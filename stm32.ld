@@ -1,18 +1,31 @@
+/*
+    Confusing naming warning: ictm and itcm in STM32 are two totally different things.
+    ictm is a dedicated bus between flash and cpu
+    itcm is a piece of ram, directly coupled to cpu, for instructions, for quick execution
+*/
+
 MEMORY
 {
   ram_main (rwx)        : ORIGIN = 0x20020000, LENGTH = 368K
   ram_backup (rwx)      : ORIGIN = 0x2007C000, LENGTH = 16K
   ram_dtcm (rwx)        : ORIGIN = 0x20000000, LENGTH = 128K
-  stack(rwx)        : ORIGIN = 0x2007BFF8, LENGTH = 0K
+  ram_itcm (rwx)        : ORIGIN = 0x00000000, LENGTH = 16K
+  stack(rwx)            : ORIGIN = 0x2007BFF8, LENGTH = 0K
 
-  rom (rx)         : ORIGIN = 0x00200000, LENGTH = 1024K
+  rom (rx)              : ORIGIN = 0x00200000, LENGTH = 1024K  /* through the ICTM bus - it seems that the DMA devices etc. understand and convert (mask) these addresses automatically */
+
+/*
+  rom_sect0_ictm   (rx) : ORIGIN = 0x00200000, LENGTH = 32K
+  rom_sect1_ictm   (rx) : ORIGIN = 0x00208000, LENGTH = 32K
+  rom_sect2_7_ictm (rx) : ORIGIN = 0x00210000, LENGTH = 960K
+*/
 }
 
 SECTIONS
 {
     .nvic_vector : 
     {
-        *(vectors)    /* Vector table */
+        *(.nvic_vector)    /* Vector table */
     } >rom
 
     . = ALIGN(8);
@@ -48,6 +61,17 @@ SECTIONS
         *(.data_dtcm.*)        
         _DATA_DTCM_END = .;
     } >ram_dtcm AT>rom
+
+    . = ALIGN(8);
+
+    _TEXT_ITCM_I_BEGIN = LOADADDR(.text_itcm);
+
+    .text_itcm :  /* Code run from 16K ITCM RAM block */ 
+    {
+        _TEXT_ITCM_BEGIN = .;
+        *(.text_itcm)
+	_TEXT_ITCM_END = .;
+    } >ram_itcm AT>rom
 
     . = ALIGN(8);
 

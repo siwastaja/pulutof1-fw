@@ -18,6 +18,8 @@
 #define IO_PULLDOWN_ON(port, idx) do{ uint32_t _tmp_ = (port)->PUPDR; _tmp_ &= ~(1UL<<((idx)*2)); _tmp_ |= 1UL<<((idx)*2+1); (port)->PUPDR = _tmp_; }while(0)
 #define IO_PULLUPDOWN_OFF(port, idx) do{ uint32_t _tmp_ = (port)->PUPDR; _tmp_ &= ~(0b11UL<<((idx)*2)); (port)->PUPDR = _tmp_; }while(0)
 
+#define IO_SPEED(port, idx, speed) do{uint32_t _tmp_ = (port)->OSPEEDR; _tmp_ &= ~(0b11UL<<((idx)*2)); _tmp_ |= (speed)<<((idx)*2); (port)->OSPEEDR = _tmp_;  }while(0)
+
 /*
 	GCC seems to be stupid enough so that it doesn't understand to "optimize" away overflow/negative shift warnings when these operations happen inside
 	the if/else branch that guarantees the "illegal" branch is always optimized away. So, we need to selectively disable warnings.
@@ -38,5 +40,7 @@
 	else if((_stream_) == 7) (_dma_)->HIFCR = 0b111101UL<<22; \
 	}while(0)
 
+
+#define IO_ALTFUNC(port, pin, af) do{ IO_TO_ALTFUNC((port),(pin)); IO_SET_ALTFUNC((port),(pin),(af));}while(0)
 
 #endif

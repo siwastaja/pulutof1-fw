@@ -14,6 +14,7 @@ extern void epc_i2c_inthandler();
 extern void epc_dcmi_dma_inthandler();
 extern void epc_shutdown_inthandler();
 extern void epc_rx_dma_inthandler();
+extern void raspi_spi_xfer_end_inthandler();
 extern void timebase_handler();
 extern unsigned int _STACKTOP;
 
@@ -37,7 +38,7 @@ unsigned int * the_nvic_vector[126] __attribute__ ((section(".nvic_vector"))) =
 /* 0x0038                    */ (unsigned int *) invalid_handler,
 /* 0x003C                    */ (unsigned int *) invalid_handler,
 /* 0x0040                    */ (unsigned int *) invalid_handler,
-/* 0x0044                    */ (unsigned int *) invalid_handler,
+/* 0x0044 PVD (volt detector)*/ (unsigned int *) epc_shutdown_inthandler,
 /* 0x0048                    */ (unsigned int *) invalid_handler,
 /* 0x004C                    */ (unsigned int *) invalid_handler,
 /* 0x0050                    */ (unsigned int *) invalid_handler,
@@ -59,7 +60,7 @@ unsigned int * the_nvic_vector[126] __attribute__ ((section(".nvic_vector"))) =
 /* 0x0090                    */ (unsigned int *) invalid_handler,
 /* 0x0094                    */ (unsigned int *) invalid_handler,
 /* 0x0098                    */ (unsigned int *) invalid_handler,
-/* 0x009C EXTI5..9           */ (unsigned int *) epc_shutdown_inthandler,
+/* 0x009C EXTI5..9           */ (unsigned int *) invalid_handler,
 /* 0x00A0                    */ (unsigned int *) invalid_handler,
 /* 0x00A4 TIM1_UP_TIM10      */ (unsigned int *) invalid_handler,
 /* 0x00A8                    */ (unsigned int *) invalid_handler,
@@ -76,7 +77,7 @@ unsigned int * the_nvic_vector[126] __attribute__ ((section(".nvic_vector"))) =
 /* 0x00D4                    */ (unsigned int *) invalid_handler,
 /* 0x00D8                    */ (unsigned int *) invalid_handler,
 /* 0x00DC                    */ (unsigned int *) invalid_handler,
-/* 0x00E0                    */ (unsigned int *) invalid_handler,
+/* 0x00E0 EXTI 10..15        */ (unsigned int *) raspi_spi_xfer_end_inthandler,
 /* 0x00E4                    */ (unsigned int *) invalid_handler,
 /* 0x00E8                    */ (unsigned int *) invalid_handler,
 /* 0x00EC                    */ (unsigned int *) invalid_handler,
@@ -159,11 +160,33 @@ extern unsigned int _DATA_DTCM_BEGIN;
 extern unsigned int _DATA_DTCM_END;
 extern unsigned int _DATA_DTCM_I_BEGIN;
 
+extern unsigned int _TEXT_ITCM_BEGIN;
+extern unsigned int _TEXT_ITCM_END;
+extern unsigned int _TEXT_ITCM_I_BEGIN;
+
 
 extern void hwtest_main();
 
 void stm32init(void)
 {
+//	static volatile int i = 5000;
+//	while(i--)
+//		__asm__ __volatile__ ("nop");
+
+//    __DSB();
+//    __ISB();
+//    SCB->CCR &= ~(uint32_t)SCB_CCR_IC_Msk;  /* disable I-Cache */
+//    SCB->ICIALLU = 0UL;                     /* invalidate I-Cache */
+//    __DSB();
+//    __ISB();
+
+
+//    SCB->CSSELR = 0U; /*(0U << 1U) | 0U;*/  /* Level 1 data cache */
+//    __DSB();
+
+//    SCB->CCR &= ~(uint32_t)SCB_CCR_DC_Msk;  /* disable D-Cache */
+//    __DSB();
+
 	uint32_t* bss_begin = (uint32_t*)&_BSS_BEGIN;
 	uint32_t* bss_end   = (uint32_t*)&_BSS_END;
 	while(bss_begin < bss_end)
@@ -192,6 +215,17 @@ void stm32init(void)
 		*data_dtcm_begin = *data_dtcm_i_begin;
 		data_dtcm_begin++;
 		data_dtcm_i_begin++;
+	}
+
+	uint32_t* text_itcm_begin  = (uint32_t*)&_TEXT_ITCM_BEGIN;
+	uint32_t* text_itcm_end    = (uint32_t*)&_TEXT_ITCM_END;
+	uint32_t* text_itcm_i_begin = (uint32_t*)&_TEXT_ITCM_I_BEGIN;
+
+	while(text_itcm_begin < text_itcm_end)
+	{
+		*text_itcm_begin = *text_itcm_i_begin;
+		text_itcm_begin++;
+		text_itcm_i_begin++;
 	}
 
 

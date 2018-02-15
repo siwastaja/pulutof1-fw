@@ -4,9 +4,8 @@
 #include "ext_include/stm32f7xx.h"
 #include "stm32_cmsis_extension.h"
 
+#include "own_std.h"
 #include "tof_table.h"
-
-#define COMPILE_TEST
 
 #define LED_ON()  HI(GPIOF, 2)
 #define LED_OFF() LO(GPIOF, 2)
@@ -54,11 +53,18 @@
 #define EPC23_RD_DMA       DMA1_Stream1
 #define EPC23_RD_DMA_CHAN  8
 
-#define RASPI_SPI     SPI2
-#define RASPI_WR_DMA       DMA1_Stream4 
-#define RASPI_WR_DMA_CHAN  0
-#define RASPI_RD_DMA       DMA1_Stream3
-#define RASPI_RD_DMA_CHAN  0
+#define DMA_STREAM(_dma_, _stream_) (_dma_ ## _Stream ## _stream_)
+
+#define RASPI_SPI       SPI2
+#define RASPI_WR_DMA    DMA1
+#define RASPI_WR_STREAM 4
+//#define RASPI_WR_DMA_STREAM DMA1_Stream4 
+
+#define RASPI_WR_DMA_CHAN   0
+#define RASPI_RD_DMA    DMA1
+#define RASPI_RD_STREAM 3
+//#define RASPI_RD_DMA_STREAM DMA1_Stream3
+#define RASPI_RD_DMA_CHAN   0
 
 #define ROBOT_SPI     SPI5
 #define ROBOT_WR_DMA       DMA2_Stream4 
@@ -104,9 +110,9 @@ void error()
 	EPCLEDV_OFF();
 	while(1)
 	{
-		RLED_ON();
+		LED_ON();
 		delay_ms(40);
-		RLED_OFF();
+		LED_OFF();
 		delay_ms(40);
 	}
 }
@@ -328,18 +334,7 @@ void epc_i2c_inthandler()
 	{
 		if(I2C3->ISR & (1UL<<15)) // busy shouldn't be high - at least fail instead of doing random shit
 		{
-			char printbuf[64];
-			__disable_irq();
-			EPC_RSTN_LOW();
-			EPCNEG10V_OFF();
-			EPC10V_OFF();
-			EPC5V_OFF();
-			EPCLEDV_OFF();
-			while(1)
-			{
-				uart_print_string_blocking("ISR="); o_utoa32(I2C3->ISR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking(" ");
-				uart_print_string_blocking("NDTR="); o_utoa32(DMA2_Stream0->NDTR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
-			}
+			error();
 		}
 
 		// Write is now finished.
@@ -414,17 +409,19 @@ void epc_dcmi_dma_inthandler()
 void epc_shutdown_inthandler()
 {
 	/*
-		Proper power-down sequence to prevent damaging the sensor.
-		This is quickly triggered from the 3V3 regulator POWER_GOOD falling down, which happens
-		instantly when its UVLO is triggered.
+		Proper power-down sequence to prevent damaging the sensors.
+		This is quickly triggered from the 3V3 line dropping.
+		The idea is to turn the reset on and disable all the other power
+		supplies in the correct order before the 3V3 line goes completely down.
 	*/
-	EPC_RSTN_LOW();
+	EPC01_RSTN_LOW();
+	EPC23_RSTN_LOW();
 	EPCNEG10V_OFF();
 	EPC10V_OFF();
 	EPC5V_OFF();
 	EPCLEDV_OFF();
-	RLED_ON();
-	error(0);
+	LED_ON();
+	while(1);
 }
 
 void epc_dcmi_init()
@@ -554,7 +551,7 @@ void apply_config(config_t *conf)
 void trig()
 {
 	static volatile uint8_t b[2] = {0xa4, 1};
-	epc_i2c_write(EPC_ADDR, b, 2);
+	epc_i2c_write(EPC02_ADDR, b, 2);
 	while(epc_i2c_is_busy());
 }
 
@@ -882,37 +879,30 @@ void tof_calc_dist_hdr(uint16_t *dist_out, epc_dcs_t *in_s, epc_dcs_t *in_l, int
 int auto_bw_exp = 1000;
 int auto_dcs_exp = 1000;
 
+#if 0
 void epc_automatic()
 {
-	delay_ms(300);
-	EPC10V_ON();
-	EPC5V_ON();
-	delay_ms(100);
-	EPCNEG10V_ON();
-	delay_ms(100);
-	EPC_RSTN_HIGH();
-	delay_ms(300);
 
 	epc_i2c_init();
 
 	{
 		epc_wrbuf[0] = 0xcb;
 		epc_wrbuf[1] = 0b01101111; // saturation bit, split mode, gated dclk, ESM
-		epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
 	}
 
 	{
 		epc_wrbuf[0] = 0x90;
 		epc_wrbuf[1] = 0b11001000;
-		epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
 	}
 
 	{
 		epc_wrbuf[0] = 0x92;
 		epc_wrbuf[1] = 0b11000100;
-		epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
 	}
 
@@ -920,7 +910,7 @@ void epc_automatic()
 	{
 		epc_wrbuf[0] = 0xcc;
 		epc_wrbuf[1] = 1<<7; //saturate data;
-		epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
 	}
 */
@@ -939,10 +929,6 @@ void epc_automatic()
 	}
 
 
-	RLED_OFF();
-	GLED_OFF();
-
-
 	while(1)
 	{
 
@@ -950,19 +936,19 @@ void epc_automatic()
 		{
 			epc_wrbuf[0] = 0x8b;
 			epc_wrbuf[1] = config.pll_shift;
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 		{
 			epc_wrbuf[0] = 0x73;
 			epc_wrbuf[1] = config.dll_shift;
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 		{
 			epc_wrbuf[0] = 0xae;
 			epc_wrbuf[1] = (config.dll_shift>0)?0x04:0x01;
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 */
@@ -1010,21 +996,21 @@ Processing:                                 (dist 37.5m composite)       (dist 7
 		{
 			epc_wrbuf[0] = 0x85;
 			epc_wrbuf[1] = 1-1; //5-1; // 37.5m (37.470m) unambiguity range
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
 		{
 			epc_wrbuf[0] = 0x90;
 			epc_wrbuf[1] = 0b11001000; // leds disabled
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
 		{
 			epc_wrbuf[0] = 0x92;
 			epc_wrbuf[1] = 0b11000100; // greyscale modulation
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1035,7 +1021,7 @@ Processing:                                 (dist 37.5m composite)       (dist 7
 			epc_wrbuf[2] = (intlen&0xff00)>>8;
 			epc_wrbuf[3] = intlen&0xff;
 
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 4);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1051,14 +1037,14 @@ Processing:                                 (dist 37.5m composite)       (dist 7
 		{
 			epc_wrbuf[0] = 0x90;
 			epc_wrbuf[1] = 0b11101000; // LED2 output on
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
 		{
 			epc_wrbuf[0] = 0x92;
 			epc_wrbuf[1] = 0b00110100; // Sinusoidal 4DCS modulation
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1070,7 +1056,7 @@ Processing:                                 (dist 37.5m composite)       (dist 7
 			epc_wrbuf[1] = 2;
 			epc_wrbuf[2] = (intlen&0xff00)>>8;
 			epc_wrbuf[3] = intlen&0xff;
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 4);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1091,7 +1077,7 @@ Processing:                                 (dist 37.5m composite)       (dist 7
 			epc_wrbuf[1] = 16*2;
 			epc_wrbuf[2] = (intlen&0xff00)>>8;
 			epc_wrbuf[3] = intlen&0xff;
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 4);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1134,14 +1120,12 @@ Processing:                                 (dist 37.5m composite)       (dist 7
 		}
 
 		{
-			RLED_ON();
 			timer_10k = 0;
 
 			static uint16_t calc_dist[EPC_XS*EPC_YS+1]; // +1 for calc time
 
 			tof_calc_dist_hdr(calc_dist, &img_dcs[0], &img_dcs[1], -5100, 1);
 
-			RLED_OFF();
 			int tooktime = timer_10k;
 			calc_dist[EPC_YS*EPC_XS] = (uint16_t)tooktime;
 
@@ -1174,7 +1158,7 @@ void epc_test()
 	uart_print_string_blocking("ok\r\n");
 
 	uart_print_string_blocking("read IC type & version...");
-	epc_i2c_read(EPC_ADDR, 0x00, epc_rdbuf, 2);
+	epc_i2c_read(EPC02_ADDR, 0x00, epc_rdbuf, 2);
 
 	while(epc_i2c_is_busy());
 	uart_print_string_blocking("type=");
@@ -1184,7 +1168,7 @@ void epc_test()
 	uart_print_string_blocking("\r\n");
 
 	uart_print_string_blocking("read embedded sync data labels... ");
-	epc_i2c_read(EPC_ADDR, 0x1c, epc_rdbuf, 4);
+	epc_i2c_read(EPC02_ADDR, 0x1c, epc_rdbuf, 4);
 	while(epc_i2c_is_busy());
 	for(int i=0; i<4; i++)
 	{
@@ -1201,7 +1185,7 @@ void epc_test()
 		epc_wrbuf[0] = 0xcb;
 		epc_wrbuf[1] = 0b01101111; // saturation bit, split mode, gated dclk, ESM
 		uart_print_string_blocking("write i2c&tcmi control reg...");
-		epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
 		uart_print_string_blocking("ok\r\n");
 	}
@@ -1210,7 +1194,7 @@ void epc_test()
 		epc_wrbuf[0] = 0x90;
 		epc_wrbuf[1] = 0b11001000;
 		uart_print_string_blocking("write led driver control...");
-		epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
 		uart_print_string_blocking("ok\r\n");
 	}
@@ -1219,7 +1203,7 @@ void epc_test()
 		epc_wrbuf[0] = 0x92;
 		epc_wrbuf[1] = 0b11000100;
 		uart_print_string_blocking("write modulation select (greyscale)...");
-		epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
 		uart_print_string_blocking("ok\r\n");
 	}
@@ -1229,7 +1213,7 @@ void epc_test()
 		epc_wrbuf[0] = 0xcc;
 		epc_wrbuf[1] = 1<<7; //saturate data;
 		uart_print_string_blocking("write tcmi polarity settings...");
-		epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
 		uart_print_string_blocking("ok\r\n");
 	}
@@ -1256,8 +1240,6 @@ void epc_test()
 //	uart_print_string_blocking("Press button S1 to start (with binary communication)");
 	uart_print_string_blocking("\r\n");
 
-	RLED_OFF();
-	GLED_OFF();
 
 //	delay_ms(300);
 
@@ -1280,17 +1262,11 @@ void epc_test()
 			else
 			{
 				conf_errors++;
-//				RLED_ON();
-//				delay_ms(50);
-//				RLED_OFF();
 			}
 		}
 		else
 		{
 			conf_errors++;
-//			RLED_ON();
-//			delay_ms(50);
-//			RLED_OFF();
 		}
 		epc_wrbuf[0] = 0x99;
 
@@ -1316,7 +1292,7 @@ void epc_test()
 		{
 			epc_wrbuf[0] = 0x8b;
 			epc_wrbuf[1] = config.pll_shift;
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1324,14 +1300,14 @@ void epc_test()
 		{
 			epc_wrbuf[0] = 0x73;
 			epc_wrbuf[1] = config.dll_shift;
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
 		{
 			epc_wrbuf[0] = 0xae;
 			epc_wrbuf[1] = (config.dll_shift>0)?0x04:0x01;
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1339,21 +1315,21 @@ void epc_test()
 		{
 			epc_wrbuf[0] = 0x85;
 			epc_wrbuf[1] = config.clk_div-1;
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
 		{
 			epc_wrbuf[0] = 0x90;
 			epc_wrbuf[1] = 0b11001000; // leds disabled
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
 		{
 			epc_wrbuf[0] = 0x92;
 			epc_wrbuf[1] = 0b11000100; // greyscale modulation
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1364,7 +1340,7 @@ void epc_test()
 			epc_wrbuf[2] = (intlen&0xff00)>>8;
 			epc_wrbuf[3] = intlen&0xff;
 
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 4);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1383,14 +1359,14 @@ void epc_test()
 		{
 			epc_wrbuf[0] = 0x90;
 			epc_wrbuf[1] = 0b11101000; // LED2 output on
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
 		{
 			epc_wrbuf[0] = 0x92;
 			epc_wrbuf[1] = 0b00110100; // Sinusoidal 4DCS modulation
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 2);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1400,7 +1376,7 @@ void epc_test()
 			epc_wrbuf[1] = 24/config.clk_div;
 			epc_wrbuf[2] = (intlen&0xff00)>>8;
 			epc_wrbuf[3] = intlen&0xff;
-			epc_i2c_write(EPC_ADDR, epc_wrbuf, 4);
+			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
 			while(epc_i2c_is_busy());
 		}
 
@@ -1484,7 +1460,6 @@ void epc_test()
 		{
 			int i = 0;
 
-			RLED_ON();
 			timer_10k = 0;
 
 			float fled = 20000000.0 / config.clk_div;
@@ -1538,7 +1513,6 @@ void epc_test()
 					txbuf[i++] = dist&0xff;
 				}
 			}
-			RLED_OFF();
 			int tooktime = timer_10k;
 			txbuf[i++] = (tooktime&0xff00)>>8;
 			txbuf[i++] = tooktime&0xff;
@@ -1555,7 +1529,6 @@ void epc_test()
 
 
 		{
-			RLED_ON();
 			timer_10k = 0;
 
 			static uint16_t calc_dist[EPC_XS*EPC_YS+1]; // +1 for calc time
@@ -1563,7 +1536,6 @@ void epc_test()
 
 			tof_calc_dist_ampl(calc_ampl, calc_dist, &img_dcs[0], config.offsets[config.clk_div], config.clk_div);
 
-			RLED_OFF();
 			int tooktime = timer_10k;
 			calc_dist[EPC_YS*EPC_XS] = (uint16_t)tooktime;
 
@@ -1582,14 +1554,16 @@ void epc_test()
 }
 #endif
 
+#endif
 
-#define NUM_ADC_DATA 2
+#define NUM_ADC_DATA 1
 
-typedef struct
+typedef struct __attribute__((packed))
 {
-	uint16_t vbat;
+	uint16_t vref;
 	uint16_t tcpu;
 } adc_datum_t;
+
 
 volatile adc_datum_t adc_data[NUM_ADC_DATA];
 
@@ -1609,6 +1583,62 @@ void uart_dbg()
 		uart_send_blocking_crc(test, 0x30, 10000);
 
 	}
+}
+
+#define SPI_TEST_LEN 1024
+volatile uint8_t spi_test_tx[SPI_TEST_LEN];
+volatile uint8_t spi_test_rx[SPI_TEST_LEN];
+
+volatile int spi_test_cnt;
+
+void raspi_spi_xfer_end_inthandler()
+{
+	EXTI->PR = 1UL<<12; // Clear "pending bit".
+
+	// Triggered when cs goes high - switch DMA rx buffers, zero the tx buffer loc
+
+	spi_test_cnt++;
+
+	while(DMA2_Stream7->CR & 1UL) ;
+
+
+	// Disable the DMAs:
+	DMA1_Stream4->CR = 0UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
+			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
+	                   1UL<<10 /*mem increment*/ | 0b01UL<<6 /*mem-to-periph*/;
+	DMA1_Stream3->CR = 0UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
+			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
+	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
+
+
+	while(DMA1_Stream4->CR & 1UL) ;
+	while(DMA1_Stream3->CR & 1UL) ;
+
+	// Hard-reset SPI - the only way to empty TXFIFO! (Go figure.)
+
+	RCC->APB1RSTR = 1UL<<14;
+	__asm__ __volatile__ ("nop");
+	RCC->APB1RSTR = 0;
+			
+	// Re-enable:
+
+	SPI2->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/;
+
+	// TX DMA
+	DMA1_Stream4->NDTR = SPI_TEST_LEN;
+	DMA_CLEAR_INTFLAGS(DMA1, 4);
+	DMA1_Stream4->CR |= 1; // Enable DMA
+
+	// RX DMA
+
+	DMA1_Stream3->NDTR = SPI_TEST_LEN;
+	DMA_CLEAR_INTFLAGS(DMA1, 3);
+	DMA1_Stream3->CR |= 1; // Enable DMA
+
+	SPI2->CR2 |= 1UL<<1 /*TX DMA ena*/; // not earlier!
+
+	SPI2->CR1 = 1UL<<6; // Enable in slave mode
+
 }
 
 void main()
@@ -1636,12 +1666,11 @@ void main()
 
 	RCC->AHB1ENR = 0xff /*GPIOA to H*/ | 1UL<<21 /*DMA1*/ | 1UL<<22 /*DMA2*/;
 	IO_TO_GPO(GPIOF, 2);
-	IO_TO_GPO(GPIOF, 3);
-	IO_TO_GPO(GPIOE, 2);
-	IO_TO_GPO(GPIOE, 3);
-	IO_TO_GPO(GPIOE, 1);
-	IO_TO_GPO(GPIOE, 0);
-	IO_TO_GPO(GPIOB, 4);
+
+	LED_ON();
+	delay_ms(5); // longer actually
+	LED_OFF();
+
 
 	RCC->APB1ENR |= 1UL<<28; // Power interface clock enable - needed to configure PWR registers
 	RCC->PLLCFGR = 9UL<<24 /*Q*/ | 1UL<<22 /*HSE as source*/ | 0b00UL<<16 /*P=2*/ | 216UL<<6 /*N*/ | 4UL /*M*/;
@@ -1655,7 +1684,6 @@ void main()
 	while(!(PWR->CSR1 & (1UL<<17))) ; // Wait for overdrive switching ready
 
 
-
 	FLASH->ACR = 1UL<<9 /* ART accelerator enable (caches) */ | 1UL<<8 /*prefetch enable*/ | 7UL /*7 wait states*/;
 	RCC->CFGR = 0b100UL<<13 /*APB2 div 2*/ | 0b101UL<<10 /*APB1 div 4*/;
 	RCC->DCKCFGR2 = 0b01UL<<4 /*USART3 = sysclk*/ | 0b00UL<<20 /*I2C3 = APB1clk*/;
@@ -1666,49 +1694,53 @@ void main()
 
 	// Enable FPU
 
-	SCB->CPACR |= 0b1111UL<<20;
-	__DSB();
-	__ISB();
+//	SCB->CPACR |= 0b1111UL<<20;
+//	__DSB();
+//	__ISB();
 
 	RCC->AHB2ENR = 1UL<<0 /*DCMI*/;
-	RCC->APB1ENR |= 1UL<<18 /*USART3*/ | 1UL<<23 /*I2C3*/ | 1UL<<3 /*TIM5*/;
-	RCC->APB2ENR = 1UL<<14 /*SYSCFG*/ | 1UL<<8 /*ADC1*/;
+	RCC->APB1ENR |= 1UL<<18 /*USART3*/ | 1UL<<23 /*I2C3*/ | 1UL<<3 /*TIM5*/ | 1UL<<14 /*SPI2*/;
+	RCC->APB2ENR = 1UL<<14 /*SYSCFG*/ | 1UL<<8 /*ADC1*/ | 1UL<<20 /*SPI5*/;
+
+	IO_TO_GPO(GPIOA,14);
+	IO_TO_GPO(GPIOE, 2);
+	IO_TO_GPO(GPIOE, 3);
+	IO_TO_GPO(GPIOD, 9);
+	IO_TO_GPO(GPIOD, 8);
+	IO_TO_GPO(GPIOE, 4);
+
+	// Before configuring the buffer output enable pins as outputs,
+	// the pins must have inactive levels (high):
+	EPC_DESEL();
+	IO_TO_GPO(GPIOA, 15);
+	IO_TO_GPO(GPIOC, 10);
+	IO_TO_GPO(GPIOE, 0);
+	IO_TO_GPO(GPIOE, 1);
 
 
-	// PIN4 = PE5 = 3V3 open-drain nPWRGOOD
-	SYSCFG->EXTICR[1] = 0b0100UL<<4; // PORTE used for EXTI5.
-	IO_PULLUP_ON(GPIOE, 5);
-	EXTI->IMR |= 1UL<<5;
-	EXTI->FTSR |= 1UL<<5;
+	LED_ON();
+	delay_ms(50);
+	LED_OFF();
+	delay_ms(200);
+	LED_ON();
+	delay_ms(50);
+	LED_OFF();
 
 	/*
 		USART3 = the raspi USART @ APB1 = 54 MHz
 		fck=216MHz
 	*/
 
+
 	IO_TO_ALTFUNC(GPIOB, 10);
 	IO_TO_ALTFUNC(GPIOB, 11);
 	IO_SET_ALTFUNC(GPIOB, 10, 7);
 	IO_SET_ALTFUNC(GPIOB, 11, 7);
-//	USART3->BRR = 216; // 1.0 Mbaud/s
-	USART3->BRR = 234; // 921600
-//	USART3->BRR = 469; // 460800
-//	USART3->BRR = 1875; // 115200
+	USART3->BRR = 1875; // 115200
 //	USART3->CR2 = 0b10UL<<12 /* 2 stop bits*/;
-	USART3->CR3 = 1UL<<6 /*RX DMA*/;
+//	USART3->CR3 = 1UL<<6 /*RX DMA*/;
 
-	DMA1_Stream1->PAR = (uint32_t)&(USART3->RDR);
-	DMA1_Stream1->M0AR = (uint32_t)&rx_config;
-
-	DMA1_Stream1->NDTR = sizeof(config_t);
-	DMA1_Stream1->CR = 4UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<18 /*double buffer OFF*/ | 1UL<<8 /*circular ON*/ |
-			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
-	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
-
-	DMA_CLEAR_INTFLAGS(DMA1, 1);
-	DMA1_Stream1->CR |= 1; // Enable DMA
-
-	USART3->CR1 = 0UL<<15 /*Oversamp:16*/ | 1UL<<5 /*RX interrupt*/ | 1UL<<3 /*TX ena*/ | 1UL<<2 /*RX ena*/ |  1UL /*USART ENA*/;
+	USART3->CR1 = 0UL<<15 /*Oversamp:16*/ | 0UL<<5 /*RX interrupt*/ | 1UL<<3 /*TX ena*/ | 1UL<<2 /*RX ena*/ |  1UL /*USART ENA*/;
 
 
 	/*	
@@ -1716,24 +1748,42 @@ void main()
 		ADC clock max 36MHz ("typ: 30 MHz")
 		prescaler = 4 -> 27MHz
 
-		Batt voltage = pin 26 = ADC1_IN10
-
+		Measured Vrefint values at:
+		3.3V -> 1505
+		3.0V -> 1656
+		2.7V -> 1840
 	*/
-//	ADC->CCR = 1UL<<23 /*temp sensor & Vref ena*/ | 0b01UL<<16 /*prescaler=4*/ | 
+	ADC->CCR = 1UL<<23 /*temp sensor & Vref ena*/ | 0b01UL<<16 /*prescaler=4*/;
 
-//	ADC1->CR1 = 1UL<<23 /*AWD ena*/ | 1UL<<9 /*AWD only on a single channel*/ | 1UL<<8 /*scan mode*/ | 1UL<<6 /*AWD interrupt*/ | 10UL /*AWD channel*/;
-//	ADC1->CR2 = 1UL<<8 /*DMA mode*/ | 1UL<<1 /*continuous conversion*/;
-//	DMA2_Stream4->PAR = (uint32_t)&(ADC1->DR);
-//	DMA2_Stream4->M0AR = (uint32_t)&(adc_data[0]);
-//	DMA2_Stream4->CR = 0UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 1UL<<8 /*circular*/ |
-//			   0b01UL<<13 /*16-bit mem*/ | 0b01UL<<11 /*16-bit periph*/ |
-//	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
-//	DMA2_Stream4->NDTR = sizeof(adc_datum_t)*NUM_ADC_DATA;
-//	DMA_CLEAR_INTFLAGS(DMA2, 4);
-//	DMA2_Stream4->CR |= 1; // Enable DMA
-//	ADC1->CR2 |= 1UL; // Enable ADC // OPT_TODO: try combining with the previous
-//	ADC1->CR2 |= 1UL<<30; // Start conversion   OPT_TODO: try removing this
+	ADC1->CR1 = 1UL<<23 /*AWD ena*/ | 1UL<<9 /*AWD only on a single channel*/ | 1UL<<8 /*scan mode*/ | 1UL<<6 /*AWD interrupt*/ | 10UL /*AWD channel*/;
+	ADC1->CR1 = 1UL<<8 /*scan mode*/;
+	ADC1->CR2 = 1UL<<8 /*DMA mode*/ | 1UL<<9 /* The magical DDS bit to actually make DMA work*/ | 1UL<<1 /*continuous conversion*/;
 
+	ADC1->SQR1 = (/*sequence length:*/ 2   -1)<<20;
+	ADC1->SQR3 = 
+		17UL<<0 /*1st conversion: Vrefint*/ |
+		18UL<<5 /*2nd conversion: Vtempsense*/;
+
+	ADC1->SMPR1 = 0b111UL<<24 /*Ch18:tempsense*/ | 0b110UL<<21 /*Ch17: Vrefint*/;
+
+	DMA2_Stream0->PAR = (uint32_t)&(ADC1->DR);
+	DMA2_Stream0->M0AR = (uint32_t)&(adc_data[0]);
+	DMA2_Stream0->CR = 0UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 1UL<<8 /*circular*/ |
+			   0b01UL<<13 /*16-bit mem*/ | 0b01UL<<11 /*16-bit periph*/ |
+	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
+	DMA2_Stream0->NDTR = sizeof(adc_datum_t)*NUM_ADC_DATA/2; /*/2 for 16-bit transfers*/
+	DMA_CLEAR_INTFLAGS(DMA2, 0);
+	DMA2_Stream0->CR |= 1; // Enable DMA
+	ADC1->CR2 |= 1UL; // Enable ADC // OPT_TODO: try combining with the previous
+	ADC1->CR2 |= 1UL<<30; // Start conversion   OPT_TODO: try removing this
+
+
+	PWR->CR1 |= 0b111UL<<5 /*Power Voltage Detector level: 2.9V*/ | 1UL<<4 /*PVD on*/;
+
+	EXTI->IMR |= 1UL<<16; // enable interurpt mask for PVD
+	// Either rising or falling PVD edge generates the interrupt:
+	EXTI->FTSR |= 1UL<<16;
+	EXTI->RTSR |= 1UL<<16;
 
 	/*
 		Interrupts will have 4 levels of pre-emptive priority, and 4 levels of sub-priority.
@@ -1744,10 +1794,8 @@ void main()
 		the order they will be run after finishing the more urgent ISR first.
 	*/
 	NVIC_SetPriorityGrouping(2);
-	NVIC_SetPriority(EXTI9_5_IRQn, 0b0000);
-	NVIC_EnableIRQ(EXTI9_5_IRQn);
-
-	IO_PULLUP_ON(GPIOC, 13);
+	NVIC_SetPriority(PVD_IRQn, 0b0000);
+	NVIC_EnableIRQ(PVD_IRQn);
 
 
 	/*
@@ -1755,23 +1803,152 @@ void main()
 		Create 10 kHz timebase interrupt
 	*/
 
-	TIM5->DIER |= 1UL; // Update interrupt
-	TIM5->ARR = 10799; // 108MHz -> 10 kHz
-	TIM5->CR1 |= 1UL; // Enable
+//	TIM5->DIER |= 1UL; // Update interrupt
+//	TIM5->ARR = 10799; // 108MHz -> 10 kHz
+//	TIM5->CR1 |= 1UL; // Enable
 
-	NVIC_SetPriority(TIM5_IRQn, 0b1010);
-	NVIC_EnableIRQ(TIM5_IRQn);
+//	NVIC_SetPriority(TIM5_IRQn, 0b1010);
+//	NVIC_EnableIRQ(TIM5_IRQn);
+
+	LED_OFF();
+
+/*
+	delay_ms(10);
+	EPC10V_ON();
+	EPC5V_ON();
+	delay_ms(10);
+	EPCNEG10V_ON();
+	delay_ms(100);
+	EPC01_RSTN_HIGH();
+	EPC23_RSTN_HIGH();
+	delay_ms(100);
+*/
+
+	uint8_t c = 0x42;
+	for(int i = 0; i < SPI_TEST_LEN; i++)
+	{
+		spi_test_tx[i] = c++;
+	}
 
 
-	__enable_irq();
+/*
+#define RASPI_SPI       SPI2
+#define RASPI_WR_DMA    DMA1
+#define RASPI_WR_STREAM 4
+//#define RASPI_WR_DMA_STREAM DMA1_Stream4 
+#define RASPI_WR_DMA_STREAM (RASPI_WR_DMA ## _Stream ## RASPI_WR_STREAM)
 
-	RLED_ON();
-	GLED_ON();
+#define RASPI_WR_DMA_CHAN   0
+#define RASPI_RD_DMA    DMA1
+#define RASPI_RD_STREAM 3
+//#define RASPI_RD_DMA_STREAM DMA1_Stream3
+#define RASPI_RD_DMA_STREAM (RASPI_RD_DMA ## _Stream ## RASPI_RD_STREAM)
+#define RASPI_RD_DMA_CHAN   0
+*/
 
-	#ifdef COMPILE_TEST
-	epc_test();
-	#else
-	epc_automatic();
-	#endif
+	IO_ALTFUNC(GPIOB, 12, 5);
+	IO_ALTFUNC(GPIOB, 13, 5);
+	IO_ALTFUNC(GPIOB, 14, 5);
+	IO_ALTFUNC(GPIOB, 15, 5);
+
+	// Max freq - tested with 1024 long sequence, contains all byte values, test ran a few times.
+	// Remember to leave safety margin - these are the highest speeds which showed no bit errors, but
+	// the test is short and at room temp only, on one device only.
+	// 0 --> 17MHz
+	// 1 --> 31MHz
+	// 2 --> 31MHz, but fewer errors at 32MHz than at speed1, so there is a miniscule difference
+	// 3 --> 41MHz
+	IO_SPEED(GPIOB, 14, 3);
+
+/*
+	spi_test_tx[0] = 0xaa;
+	spi_test_tx[1] = 0xbb;
+	spi_test_tx[2] = 0xcc;
+	spi_test_tx[3] = 0xdd;
+	spi_test_tx[4] = 0xee;
+*/
+//	delay_us(100);
+
+
+
+	// Initialization order from reference manual:
+
+	SPI2->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/;
+
+	// TX DMA
+	DMA1_Stream4->PAR = (uint32_t)&(SPI2->DR);
+	DMA1_Stream4->M0AR = (uint32_t)&(spi_test_tx[0]);
+	DMA1_Stream4->CR = 0UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
+			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
+	                   1UL<<10 /*mem increment*/ | 0b01UL<<6 /*mem-to-periph*/;
+	DMA1_Stream4->NDTR = SPI_TEST_LEN;
+	DMA_CLEAR_INTFLAGS(DMA1, 4);
+	DMA1_Stream4->CR |= 1; // Enable TX DMA
+
+	// RX DMA
+
+	DMA1_Stream3->PAR = (uint32_t)&(SPI2->DR);
+	DMA1_Stream3->M0AR = (uint32_t)&(spi_test_rx[0]);
+	DMA1_Stream3->CR = 0UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
+			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
+	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
+	DMA1_Stream3->NDTR = SPI_TEST_LEN;
+	DMA_CLEAR_INTFLAGS(DMA1, 3);
+	DMA1_Stream3->CR |= 1; // Enable RX DMA
+
+	SPI2->CR2 |= 1UL<<1 /*TX DMA ena*/; // not earlier!
+
+	SPI2->CR1 = 1UL<<6; // Enable in slave mode
+
+	// Chip select is hardware managed for rx start - but ending must be handled by software. We use EXTI for that.
+
+	// nCS is PB12, so EXTI12 must be used.
+	SYSCFG->EXTICR[/*refman idx:*/4   -1] = 0b0001UL<<0; // PORTB used for EXTI12.
+	IO_PULLUP_ON(GPIOB, 12); // Pull the nCS up to avoid glitches before Raspi initialization
+	EXTI->IMR |= 1UL<<12;
+	EXTI->RTSR |= 1UL<<12; // Get the rising edge interrupt
+	// The interrupt priority must be fairly high, to quickly reconfigure the DMA so that if the master pulls CSn low
+	// again very quickly to make a new transaction, we have the DMA up and running for that before the super small 4-byte
+	// FIFO in the SPI is exhausted.
+	NVIC_SetPriority(EXTI15_10_IRQn, 0b0101);
+	NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+	/*
+		MOSI = green
+		MISO = blue
+		SCK  = violet
+		CS0  = grey
+	*/
+
+	while(1)
+	{
+		char printbuf[64];
+		uart_print_string_blocking("SPI SR = "); o_utoa16(SPI2->SR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
+		uart_print_string_blocking("tx NDTR = "); o_utoa16(DMA1_Stream4->NDTR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
+		uart_print_string_blocking("rx NDTR = "); o_utoa16(DMA1_Stream3->NDTR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
+		uart_print_string_blocking("spi_test_cnt = "); o_utoa16(spi_test_cnt, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
+
+		/*
+		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[0], printbuf); uart_print_string_blocking(printbuf);
+		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[1], printbuf); uart_print_string_blocking(printbuf);
+		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[2], printbuf); uart_print_string_blocking(printbuf);
+		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[3], printbuf); uart_print_string_blocking(printbuf);
+		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[4], printbuf); uart_print_string_blocking(printbuf);
+		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[5], printbuf); uart_print_string_blocking(printbuf);
+		uart_print_string_blocking("\r\n");
+		*/
+
+		uart_print_string_blocking("\r\n\r\n");
+		delay_ms(100);
+
+//		LED_ON();
+//		delay_ms(500);
+//		LED_OFF();
+//		delay_ms(500);
+	}
+
+//	__enable_irq();
+
+
 	//uart_dbg();
 }

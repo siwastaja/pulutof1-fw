@@ -23,10 +23,14 @@ main.bin: $(OBJ)
 	$(OBJCOPY) -Obinary --remove-section=.ARM* main.elf main_full.bin
 	$(SIZE) main.elf
 
+fr: main.bin
+	scp main_full.bin hrst@192.168.1.5:~/main_full.bin
+
 flash_full: main.bin
 	stm32sprog -b 115200 -vw main_full.bin
 
-flash: flash_full
+flash: main.bin
+	stm32sprog -b 115200 -vw main_full.bin
 
 stack:
 	cat *.su
@@ -43,7 +47,7 @@ syms:
 asm: $(ASMS)
 
 e: 
-	gedit --new-window stm32init.c main.c &
+	gedit --new-window stm32.ld stm32init.c main.c flash.c flash.h &
 
 s:
 	screen /dev/ttyUSB0 115200
