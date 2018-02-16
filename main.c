@@ -1851,24 +1851,109 @@ void main()
 	IO_ALTFUNC(GPIOB, 14, 5);
 	IO_ALTFUNC(GPIOB, 15, 5);
 
-	// Max freq - tested with 1024 long sequence, contains all byte values, test ran a few times.
-	// Remember to leave safety margin - these are the highest speeds which showed no bit errors, but
-	// the test is short and at room temp only, on one device only.
-	// 0 --> 17MHz
-	// 1 --> 31MHz
-	// 2 --> 31MHz, but fewer errors at 32MHz than at speed1, so there is a miniscule difference
-	// 3 --> 41MHz
-	IO_SPEED(GPIOB, 14, 3);
-
 /*
-	spi_test_tx[0] = 0xaa;
-	spi_test_tx[1] = 0xbb;
-	spi_test_tx[2] = 0xcc;
-	spi_test_tx[3] = 0xdd;
-	spi_test_tx[4] = 0xee;
-*/
-//	delay_us(100);
+	 Max freq - tested with 1024 long sequence, contains all byte values, test ran a few times.
+	 Remember to leave safety margin - these are the highest speeds which showed no bit errors, but
+	 the test is short and at room temp only, on one device only.
+	 0 --> 17MHz
+	 1 --> 31MHz
+	 2 --> 31MHz, but fewer errors at 32MHz than at speed1, so there is a miniscule difference
+	 3 --> 41MHz
 
+	PERFORMANCE EVALUATION:
+
+	spidev-based code running on Raspi3
+	10 MHz: (Actually 9MHz?)
+
+		20000 packets, 1000 bytes each, 20000000 bytes total
+		time = 17.392436 sec
+		1149.925143 packets/s
+		1.150 Mbytes/s (92.0% of expected maximum)
+			3.3% CPU without data checking
+
+		total_misses = 0, in 0 packets
+		20000 packets, 1000 bytes each, 20000000 bytes total
+		time = 17.852798 sec
+		1120.272581 packets/s
+		1.120 Mbytes/s (89.6% of expected maximum)
+			5.3% CPU with checking
+
+
+	20 MHz: (Actually seems to be 18MHz)
+
+		40000 packets, 1000 bytes each, 40000000 bytes total
+		time = 19.348816 sec
+		2067.309991 packets/s
+		2.067 Mbytes/s (82.7% of expected maximum)
+			5.6% CPU without data checking
+
+		total_misses = 0, in 0 packets
+		40000 packets, 1000 bytes each, 40000000 bytes total
+		time = 20.160486 sec
+		1984.079132 packets/s
+		1.984 Mbytes/s (79.4% of expected maximum)
+			9.3% CPU with checking
+
+	30 MHz: (Actually seems to be 25MHz, that's why the percentages of expected rates are low)
+
+		60000 packets, 1000 bytes each, 60000000 bytes total
+		time = 21.272461 sec
+		2820.548160 packets/s
+		2.821 Mbytes/s (75.2% of expected maximum)
+			7.3% CPU without data checking
+
+		total_misses = 0, in 0 packets
+		60000 packets, 1000 bytes each, 60000000 bytes total
+		time = 22.498095 sec
+		2666.892464 packets/s
+		2.667 Mbytes/s (71.1% of expected maximum)
+			12.5% CPU with checking
+
+
+	40 MHz: (Actually seems to be 32MHz, that's why the percentages of expected rates are low)
+
+		80000 packets, 1000 bytes each, 80000000 bytes total
+		time = 23.269042 sec
+		3438.044364 packets/s
+		3.438 Mbytes/s (68.8% of expected maximum)
+			9.3% CPU without data checking
+
+		total_misses = 0, in 0 packets
+		80000 packets, 1000 bytes each, 80000000 bytes total
+		time = 24.886482 sec
+		3214.596595 packets/s
+		3.215 Mbytes/s (64.3% of expected maximum)
+			15.2% CPU with checking
+
+	32 MHz: (Basically the same, just to get the percentage calculation right)
+
+		80000 packets, 1000 bytes each, 80000000 bytes total
+		time = 23.190757 sec
+		3449.650275 packets/s
+		3.450 Mbytes/s (86.2% of expected maximum)
+			8.9% CPU without data checking
+
+
+	32 MHz, alternative with packet size=250 instead of 1000:
+
+		320000 packets, 250 bytes each, 80000000 bytes total
+		time = 30.292229 sec
+		10563.765324 packets/s
+		2.641 Mbytes/s (66.0% of expected maximum)
+			25.5% CPU without data checking
+
+		total_misses = 0, in 0 packets
+		320000 packets, 250 bytes each, 80000000 bytes total
+		time = 32.072579 sec
+		9977.370537 packets/s
+		2.494 Mbytes/s (62.4% of expected maximum)
+			29.1% CPU with checking
+
+
+		Note on CPU percentages: As seen by top. a simple while(1); in a single thread tops it out at 100%, so it's a single core number.
+*/
+
+	IO_SPEED(GPIOB, 14, 3);
 
 
 	// Initialization order from reference manual:
@@ -1928,16 +2013,6 @@ void main()
 		uart_print_string_blocking("rx NDTR = "); o_utoa16(DMA1_Stream3->NDTR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
 		uart_print_string_blocking("spi_test_cnt = "); o_utoa16(spi_test_cnt, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
 
-		/*
-		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[0], printbuf); uart_print_string_blocking(printbuf);
-		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[1], printbuf); uart_print_string_blocking(printbuf);
-		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[2], printbuf); uart_print_string_blocking(printbuf);
-		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[3], printbuf); uart_print_string_blocking(printbuf);
-		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[4], printbuf); uart_print_string_blocking(printbuf);
-		uart_print_string_blocking(" "); o_utoa8_fixed(spi_test_tx[5], printbuf); uart_print_string_blocking(printbuf);
-		uart_print_string_blocking("\r\n");
-		*/
-
 		uart_print_string_blocking("\r\n\r\n");
 		delay_ms(100);
 
@@ -1946,8 +2021,6 @@ void main()
 //		LED_OFF();
 //		delay_ms(500);
 	}
-
-//	__enable_irq();
 
 
 	//uart_dbg();
