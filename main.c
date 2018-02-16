@@ -1585,7 +1585,7 @@ void uart_dbg()
 	}
 }
 
-#define SPI_TEST_LEN 1024
+#define SPI_TEST_LEN 10000
 volatile uint8_t spi_test_tx[SPI_TEST_LEN];
 volatile uint8_t spi_test_rx[SPI_TEST_LEN];
 
@@ -1949,6 +1949,21 @@ void main()
 		2.494 Mbytes/s (62.4% of expected maximum)
 			29.1% CPU with checking
 
+
+	32 MHz, alternative with packet size=10000 instead of 1000:
+
+		8000 packets, 10000 bytes each, 80000000 bytes total
+		time = 20.916997 sec
+		382.464087 packets/s
+		3.825 Mbytes/s (95.6% of expected maximum)
+			2.0% CPU without data checking
+
+		total_misses = 0, in 0 packets
+		8000 packets, 10000 bytes each, 80000000 bytes total
+		time = 22.484095 sec
+		355.807078 packets/s
+		3.558 Mbytes/s (89.0% of expected maximum)
+			8.9% CPU with checking
 
 		Note on CPU percentages: As seen by top. a simple while(1); in a single thread tops it out at 100%, so it's a single core number.
 */
