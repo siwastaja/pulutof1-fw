@@ -5,13 +5,13 @@ LD = arm-none-eabi-gcc
 SIZE = arm-none-eabi-size
 OBJCOPY = arm-none-eabi-objcopy
 
-CFLAGS = -I. -Os -fno-common -ffunction-sections -ffreestanding -fno-builtin -mthumb -mcpu=cortex-m7 -Wall -fstack-usage -DSTM32F765xx -mfloat-abi=hard -mfpu=fpv5-d16
+CFLAGS = -I. -Os -fno-common -ffunction-sections -ffreestanding -fno-builtin -mthumb -mcpu=cortex-m7 -Wall -fstack-usage -DSTM32F765xx -mfloat-abi=hard -mfpu=fpv5-d16 -fno-strict-aliasing
 ASMFLAGS = -S -fverbose-asm
 LDFLAGS = -mcpu=cortex-m7 -mthumb -nostartfiles -gc-sections -mfloat-abi=hard -mfpu=fpv5-d16
 
 DEPS =
-OBJ = stm32init.o main.o own_std.o tof_table.o
-ASMS = stm32init.s main.s own_std.s tof_table.s
+OBJ = stm32init.o main.o own_std.o tof_table.o flash.o
+ASMS = stm32init.s main.s own_std.s tof_table.s flash.s
 
 all: main.bin
 
@@ -24,7 +24,7 @@ main.bin: $(OBJ)
 	$(SIZE) main.elf
 
 fr: main.bin
-	scp main_full.bin hrst@192.168.1.5:~/main_full.bin
+	scp main_full.bin hrst@192.168.1.3:~/main_full.bin
 
 flash_full: main.bin
 	stm32sprog -b 115200 -vw main_full.bin

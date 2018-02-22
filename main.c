@@ -6,6 +6,7 @@
 
 #include "own_std.h"
 #include "tof_table.h"
+#include "flash.h"
 
 #define LED_ON()  HI(GPIOF, 2)
 #define LED_OFF() LO(GPIOF, 2)
@@ -82,6 +83,14 @@
 #define sq(x) ((x)*(x))
 
 
+typedef struct __attribute__((packed))
+{
+	int32_t ang; // int32_t range --> -180..+180 deg; let it overflow freely. 1 unit = 83.81903171539 ndeg
+	int32_t x;   // in mm
+	int32_t y;
+} pos_t;
+
+void delay_us(uint32_t i) __attribute__((section(".text_itcm")));
 void delay_us(uint32_t i)
 {
 	if(i==0) return;
@@ -91,6 +100,7 @@ void delay_us(uint32_t i)
 		__asm__ __volatile__ ("nop");
 }
 
+void delay_ms(uint32_t i) __attribute__((section(".text_itcm")));
 void delay_ms(uint32_t i)
 {
 	while(i--)
@@ -392,11 +402,11 @@ typedef struct __attribute__((packed))
 	epc_img_t dcs[4];
 } epc_dcs_t;
 
-epc_img_t img_mono;
+//epc_img_t img_mono;
 
-epc_img_t img_compmono;
+//epc_img_t img_compmono;
 
-epc_dcs_t img_dcs[2];
+//epc_dcs_t img_dcs[2];
 
 volatile int epc_capture_finished = 0;
 void epc_dcmi_dma_inthandler()
@@ -1591,16 +1601,34 @@ volatile uint8_t spi_test_rx[SPI_TEST_LEN];
 
 volatile int spi_test_cnt;
 
+/*
+	STM32 SPI doesn't _actually_ support any kind of nSS pin hardware management in slave mode, even when they are talking about it like that.
+	The hint is that while they talk about nSS slave HW management, they don't tell you what it means in _practice_.
+
+	So, when the SPI is enabled with DMA, it always generates 3 DMA requests right away to fill its TX fifo with 3 bytes. When the
+	nSS is asserted half a year later, the first 3 bytes are from half a year ago, rest is DMA'ed from the memory at that point.
+
+	To fix this, we would need interrupt logic also from the falling nSS edge, quickly setting up the SPI and DMA. But maybe we don't need to
+	do that:
+
+	The type of the data packet we are going to send has been decided even before the nSS edge - so we'll apply a 4-byte header telling
+	about the data type (or anything else that doesn't need to be recent).
+
+	This has the advantage that there is one urgent ISR less to handle very quickly. DMA and SPI will happily crunch 4 extra bytes without
+	wasting any CPU time. The same works on the RASPI side - we don't even need to look at those 4 bytes if we don't have time to do that.
+*/
+
+volatile uint32_t last_hommel;
+
+volatile int new_rx, new_rx_len;
+
 void raspi_spi_xfer_end_inthandler()
 {
-	EXTI->PR = 1UL<<12; // Clear "pending bit".
-
 	// Triggered when cs goes high - switch DMA rx buffers, zero the tx buffer loc
 
+	EXTI->PR = 1UL<<12; // Clear "pending bit".
+
 	spi_test_cnt++;
-
-	while(DMA2_Stream7->CR & 1UL) ;
-
 
 	// Disable the DMAs:
 	DMA1_Stream4->CR = 0UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
@@ -1610,9 +1638,20 @@ void raspi_spi_xfer_end_inthandler()
 			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
 	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
 
-
 	while(DMA1_Stream4->CR & 1UL) ;
 	while(DMA1_Stream3->CR & 1UL) ;
+
+	new_rx = 1;
+	new_rx_len = SPI_TEST_LEN - DMA1_Stream3->NDTR;
+
+
+	// Check if there is the maintenance magic code:
+
+	last_hommel = *((volatile uint32_t*)&spi_test_rx[0]);
+	if(*((volatile uint32_t*)&spi_test_rx[0]) == 0x9876fedb)
+	{
+		run_flasher();
+	}
 
 	// Hard-reset SPI - the only way to empty TXFIFO! (Go figure.)
 
@@ -1622,7 +1661,7 @@ void raspi_spi_xfer_end_inthandler()
 			
 	// Re-enable:
 
-	SPI2->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/;
+	SPI2->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/ | 1UL<<12 /*Don't Reject The Last Byte*/;
 
 	// TX DMA
 	DMA1_Stream4->NDTR = SPI_TEST_LEN;
@@ -1638,6 +1677,51 @@ void raspi_spi_xfer_end_inthandler()
 	SPI2->CR2 |= 1UL<<1 /*TX DMA ena*/; // not earlier!
 
 	SPI2->CR1 = 1UL<<6; // Enable in slave mode
+
+}
+
+/*
+	Between the RobotBoard and the PULUTOF1 MASTER,
+	there's a continuous SPI transfer going on. With fixed length and no gaps,
+	it can fully run on DMA.
+
+	PULUTOF1 MASTER is the SPI MASTER, RobotBoard is slave.
+*/
+
+typedef struct __attribute__((packed))
+{
+	uint8_t dummy[12];
+} master_to_robot_t;
+
+typedef struct __attribute__((packed))
+{
+	pos_t robot_pos;
+} robot_to_master_t;
+
+
+typedef struct __attribute__((packed))
+{
+	uint32_t header;
+	uint8_t status; // Only read this and deassert chip select for polling the status
+	uint8_t dummy1;
+	uint8_t dummy2;
+	uint8_t sensor_idx;
+
+	pos_t robot_pos; // Robot pose during the acquisition
+
+	uint16_t depth[EPC_XS*EPC_YS];
+	uint8_t  ampl[EPC_XS*EPC_YS];
+	uint8_t  ambient[EPC_XS*EPC_YS];
+
+	uint16_t timestamps[10]; // 0.1ms unit timestamps of various steps for analyzing the timing of low-level processing
+
+} pulutof_frame_t;
+
+pulutof_frame_t raspi_tx;
+
+void init_raspi_tx()
+{
+	raspi_tx.header = 0x11223344;
 
 }
 
@@ -1803,12 +1887,12 @@ void main()
 		Create 10 kHz timebase interrupt
 	*/
 
-//	TIM5->DIER |= 1UL; // Update interrupt
-//	TIM5->ARR = 10799; // 108MHz -> 10 kHz
-//	TIM5->CR1 |= 1UL; // Enable
+	TIM5->DIER |= 1UL; // Update interrupt
+	TIM5->ARR = 10799; // 108MHz -> 10 kHz
+	TIM5->CR1 |= 1UL; // Enable
 
-//	NVIC_SetPriority(TIM5_IRQn, 0b1010);
-//	NVIC_EnableIRQ(TIM5_IRQn);
+	NVIC_SetPriority(TIM5_IRQn, 0b1010);
+	NVIC_EnableIRQ(TIM5_IRQn);
 
 	LED_OFF();
 
@@ -1830,150 +1914,24 @@ void main()
 		spi_test_tx[i] = c++;
 	}
 
-
-/*
-#define RASPI_SPI       SPI2
-#define RASPI_WR_DMA    DMA1
-#define RASPI_WR_STREAM 4
-//#define RASPI_WR_DMA_STREAM DMA1_Stream4 
-#define RASPI_WR_DMA_STREAM (RASPI_WR_DMA ## _Stream ## RASPI_WR_STREAM)
-
-#define RASPI_WR_DMA_CHAN   0
-#define RASPI_RD_DMA    DMA1
-#define RASPI_RD_STREAM 3
-//#define RASPI_RD_DMA_STREAM DMA1_Stream3
-#define RASPI_RD_DMA_STREAM (RASPI_RD_DMA ## _Stream ## RASPI_RD_STREAM)
-#define RASPI_RD_DMA_CHAN   0
-*/
-
 	IO_ALTFUNC(GPIOB, 12, 5);
 	IO_ALTFUNC(GPIOB, 13, 5);
 	IO_ALTFUNC(GPIOB, 14, 5);
 	IO_ALTFUNC(GPIOB, 15, 5);
 
-/*
-	 Max freq - tested with 1024 long sequence, contains all byte values, test ran a few times.
-	 Remember to leave safety margin - these are the highest speeds which showed no bit errors, but
-	 the test is short and at room temp only, on one device only.
-	 0 --> 17MHz
-	 1 --> 31MHz
-	 2 --> 31MHz, but fewer errors at 32MHz than at speed1, so there is a miniscule difference
-	 3 --> 41MHz
-
-	PERFORMANCE EVALUATION:
-
-	spidev-based code running on Raspi3
-	10 MHz: (Actually 9MHz?)
-
-		20000 packets, 1000 bytes each, 20000000 bytes total
-		time = 17.392436 sec
-		1149.925143 packets/s
-		1.150 Mbytes/s (92.0% of expected maximum)
-			3.3% CPU without data checking
-
-		total_misses = 0, in 0 packets
-		20000 packets, 1000 bytes each, 20000000 bytes total
-		time = 17.852798 sec
-		1120.272581 packets/s
-		1.120 Mbytes/s (89.6% of expected maximum)
-			5.3% CPU with checking
-
-
-	20 MHz: (Actually seems to be 18MHz)
-
-		40000 packets, 1000 bytes each, 40000000 bytes total
-		time = 19.348816 sec
-		2067.309991 packets/s
-		2.067 Mbytes/s (82.7% of expected maximum)
-			5.6% CPU without data checking
-
-		total_misses = 0, in 0 packets
-		40000 packets, 1000 bytes each, 40000000 bytes total
-		time = 20.160486 sec
-		1984.079132 packets/s
-		1.984 Mbytes/s (79.4% of expected maximum)
-			9.3% CPU with checking
-
-	30 MHz: (Actually seems to be 25MHz, that's why the percentages of expected rates are low)
-
-		60000 packets, 1000 bytes each, 60000000 bytes total
-		time = 21.272461 sec
-		2820.548160 packets/s
-		2.821 Mbytes/s (75.2% of expected maximum)
-			7.3% CPU without data checking
-
-		total_misses = 0, in 0 packets
-		60000 packets, 1000 bytes each, 60000000 bytes total
-		time = 22.498095 sec
-		2666.892464 packets/s
-		2.667 Mbytes/s (71.1% of expected maximum)
-			12.5% CPU with checking
-
-
-	40 MHz: (Actually seems to be 32MHz, that's why the percentages of expected rates are low)
-
-		80000 packets, 1000 bytes each, 80000000 bytes total
-		time = 23.269042 sec
-		3438.044364 packets/s
-		3.438 Mbytes/s (68.8% of expected maximum)
-			9.3% CPU without data checking
-
-		total_misses = 0, in 0 packets
-		80000 packets, 1000 bytes each, 80000000 bytes total
-		time = 24.886482 sec
-		3214.596595 packets/s
-		3.215 Mbytes/s (64.3% of expected maximum)
-			15.2% CPU with checking
-
-	32 MHz: (Basically the same, just to get the percentage calculation right)
-
-		80000 packets, 1000 bytes each, 80000000 bytes total
-		time = 23.190757 sec
-		3449.650275 packets/s
-		3.450 Mbytes/s (86.2% of expected maximum)
-			8.9% CPU without data checking
-
-
-	32 MHz, alternative with packet size=250 instead of 1000:
-
-		320000 packets, 250 bytes each, 80000000 bytes total
-		time = 30.292229 sec
-		10563.765324 packets/s
-		2.641 Mbytes/s (66.0% of expected maximum)
-			25.5% CPU without data checking
-
-		total_misses = 0, in 0 packets
-		320000 packets, 250 bytes each, 80000000 bytes total
-		time = 32.072579 sec
-		9977.370537 packets/s
-		2.494 Mbytes/s (62.4% of expected maximum)
-			29.1% CPU with checking
-
-
-	32 MHz, alternative with packet size=10000 instead of 1000:
-
-		8000 packets, 10000 bytes each, 80000000 bytes total
-		time = 20.916997 sec
-		382.464087 packets/s
-		3.825 Mbytes/s (95.6% of expected maximum)
-			2.0% CPU without data checking
-
-		total_misses = 0, in 0 packets
-		8000 packets, 10000 bytes each, 80000000 bytes total
-		time = 22.484095 sec
-		355.807078 packets/s
-		3.558 Mbytes/s (89.0% of expected maximum)
-			8.9% CPU with checking
-
-		Note on CPU percentages: As seen by top. a simple while(1); in a single thread tops it out at 100%, so it's a single core number.
-*/
-
-	IO_SPEED(GPIOB, 14, 3);
+	IO_SPEED(GPIOB, 14, 3); // MISO pin gets the highest speed.
 
 
 	// Initialization order from reference manual:
 
-	SPI2->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/;
+	/*
+		STM32 TRAP WARNING:
+		FRXTH (bit 12) in SPI->CR2 needs to be set for the SPI to work in a sane way. Otherwise, DMA
+		requests for the last transfer never come, and the last data cannot be never read in the specified way!
+		I can't figure out any reason to use such mode, and it's the default. So remember to set this bit.
+	*/
+
+	SPI2->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/ | 1UL<<12 /*Don't Reject The Last Byte*/;
 
 	// TX DMA
 	DMA1_Stream4->PAR = (uint32_t)&(SPI2->DR);
@@ -2022,19 +1980,46 @@ void main()
 
 	while(1)
 	{
+
 		char printbuf[64];
 		uart_print_string_blocking("SPI SR = "); o_utoa16(SPI2->SR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
 		uart_print_string_blocking("tx NDTR = "); o_utoa16(DMA1_Stream4->NDTR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
 		uart_print_string_blocking("rx NDTR = "); o_utoa16(DMA1_Stream3->NDTR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
 		uart_print_string_blocking("spi_test_cnt = "); o_utoa16(spi_test_cnt, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
+		uart_print_string_blocking("last_hommel = "); o_utoa32(last_hommel, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
+
+		uart_print_string_blocking("timer_10k = "); o_utoa32(timer_10k, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
 
 		uart_print_string_blocking("\r\n\r\n");
 		delay_ms(100);
+
+
+		if(new_rx)
+		{
+			new_rx = 0;
+			int len = new_rx_len;
+			uart_print_string_blocking("len = "); o_utoa32(len, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
+
+			for(int i=0; i<len; i++)
+			{
+				if(i%4 == 0) uart_print_string_blocking(" ");
+				if(i%32 == 0) uart_print_string_blocking("\r\n");
+				o_utoa8_hex(spi_test_rx[i], printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking(" ");
+
+			}
+
+			uart_print_string_blocking("\r\n\r\n");
+			
+		}
+
 
 //		LED_ON();
 //		delay_ms(500);
 //		LED_OFF();
 //		delay_ms(500);
+
+
+
 	}
 
 
