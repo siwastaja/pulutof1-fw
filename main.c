@@ -75,12 +75,15 @@
 
 
 
-#define EPC02_ADDR 0b0100000
+#define EPC02_ADDR 0b0100001
 #define EPC13_ADDR 0b0100001
 
 
 
 #define sq(x) ((x)*(x))
+
+volatile int new_rx, new_rx_len;
+
 
 
 typedef struct __attribute__((packed))
@@ -109,24 +112,6 @@ void delay_ms(uint32_t i)
 	}
 }
 
-void error()
-{
-	__disable_irq();
-	EPC01_RSTN_LOW();
-	EPC23_RSTN_LOW();
-	EPCNEG10V_OFF();
-	EPC10V_OFF();
-	EPC5V_OFF();
-	EPCLEDV_OFF();
-	while(1)
-	{
-		LED_ON();
-		delay_ms(40);
-		LED_OFF();
-		delay_ms(40);
-	}
-}
-
 void uart_print_string_blocking(const char *buf)
 {
 	while(buf[0] != 0)
@@ -136,6 +121,33 @@ void uart_print_string_blocking(const char *buf)
 		buf++;
 	}
 }
+
+void error(int code)
+{
+	__disable_irq();
+	EPC01_RSTN_LOW();
+	EPC23_RSTN_LOW();
+	EPCNEG10V_OFF();
+	EPC10V_OFF();
+	EPC5V_OFF();
+	EPCLEDV_OFF();
+	EPC_DESEL();
+	int i = 0;
+	while(1)
+	{
+		LED_ON();
+		delay_ms(40);
+		LED_OFF();
+		delay_ms(40);
+		if(++i == 10)
+		{
+			i = 0;
+			char printbuf[32];
+			uart_print_string_blocking(" E"); o_utoa32(code, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking(" ");
+		}
+	}
+}
+
 
 void uart_send_blocking(const uint8_t *buf, int len)
 {
@@ -208,7 +220,7 @@ void epc_i2c_write_dma(uint8_t slave_addr_7b, volatile uint8_t *buf, uint8_t len
 		I don't know what the hell is going on, but for some reason I can't understand, invalidation of data cache here
 		seemed to fix the issue.
 	*/
-	SCB_InvalidateDCache();
+	__DSB(); __ISB();
 
 	if(epc_i2c_write_busy || epc_i2c_read_busy)
 		error(11);
@@ -344,7 +356,7 @@ void epc_i2c_inthandler()
 	{
 		if(I2C3->ISR & (1UL<<15)) // busy shouldn't be high - at least fail instead of doing random shit
 		{
-			error();
+			error(22);
 		}
 
 		// Write is now finished.
@@ -400,11 +412,17 @@ typedef struct __attribute__((packed))
 typedef struct __attribute__((packed))
 {
 	epc_img_t dcs[4];
-} epc_dcs_t;
+} epc_4dcs_t;
 
-//epc_img_t img_mono;
+typedef struct __attribute__((packed))
+{
+	epc_img_t dcs[2];
+} epc_2dcs_t;
 
-//epc_img_t img_compmono;
+
+epc_img_t img_mono;
+
+epc_img_t img_compmono;
 
 //epc_dcs_t img_dcs[2];
 
@@ -430,6 +448,7 @@ void epc_shutdown_inthandler()
 	EPC10V_OFF();
 	EPC5V_OFF();
 	EPCLEDV_OFF();
+	EPC_DESEL();
 	LED_ON();
 	while(1);
 }
@@ -443,7 +462,7 @@ void epc_dcmi_init()
 	IO_TO_ALTFUNC(GPIOG, 10);
 	IO_TO_ALTFUNC(GPIOG, 11);
 	IO_TO_ALTFUNC(GPIOC, 11);
-	IO_TO_ALTFUNC(GPIOB,  6);
+	IO_TO_ALTFUNC(GPIOD,  3);
 	IO_TO_ALTFUNC(GPIOB,  8);
 	IO_TO_ALTFUNC(GPIOB,  9);
 
@@ -453,7 +472,7 @@ void epc_dcmi_init()
 	IO_SET_ALTFUNC(GPIOG, 10, 13);
 	IO_SET_ALTFUNC(GPIOG, 11, 13);
 	IO_SET_ALTFUNC(GPIOC, 11, 13);
-	IO_SET_ALTFUNC(GPIOB,  6, 13);
+	IO_SET_ALTFUNC(GPIOD,  3, 13);
 	IO_SET_ALTFUNC(GPIOB,  8, 13);
 	IO_SET_ALTFUNC(GPIOB,  9, 13);
 
@@ -480,7 +499,6 @@ void epc_dcmi_init()
 
 	DCMI->CR |= 1UL<<0; // Start CAPTURE
 
-
 }
 
 void dcmi_start_dma(void *data, int size)
@@ -496,14 +514,14 @@ void dcmi_start_dma(void *data, int size)
 
 	DMA2_Stream7->M0AR = (uint32_t)data;
 
-	DMA2_Stream7->NDTR = size;
+	DMA2_Stream7->NDTR = size/4+1; // Num of 32-bit transfers
 	DMA2_Stream7->CR = 1UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 
 			   0b10UL<<13 /*32-bit mem*/ | 0b10UL<<11 /*32-bit periph*/ |
 	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/ | 1UL<<4 /* Transfer complete interrupt*/;
 
 	DMA_CLEAR_INTFLAGS(DMA2, 7);
 	DMA2_Stream7->CR |= 1; // Enable DMA
-
+	__DSB(); __ISB();
 }
 
 
@@ -523,19 +541,14 @@ typedef struct __attribute__((packed))
 
 config_t config =  // active configuration
 {
-	.bw_int_len = 1000,
-	.dist_int_len = 1000,
+	.bw_int_len = 500,
+	.dist_int_len = 200,
 	.clk_div = 1,
-	.pll_shift = 0
+	.pll_shift = 0,
+	.dll_shift = 0,
+	.offsets = {0,0,0,0,0,0,0}
 };
 
-config_t rx_config = // modified config
-{
-	.bw_int_len = 1000,
-	.dist_int_len = 1000,
-	.clk_div = 1,
-	.pll_shift = 0
-};
 
 void apply_config(config_t *conf)
 {
@@ -576,48 +589,12 @@ void timebase_handler()
 	timer_10k++;
 }
 
-int16_t get_tof_tbl(int16_t y, int16_t x)
-{
-	int yy, xx;
-
-	if(y<0)
-		yy = -y;
-	else
-		yy = y;
-
-	if(x<0)
-		xx = -x;
-	else
-		xx = x;
-
-	int swapped = 0;
-	if(xx<yy)
-	{
-		swapped = 1;
-		int16_t tmp = xx;
-		xx = yy;
-		yy = tmp;
-	}
-
-	if(xx == 0) return 0;
-
-	int idx = (yy*(TOF_TBL_LEN-1))/xx;
-
-	int16_t res = tof_tbl[idx];
-	if(swapped) res = TOF_TBL_QUART_PERIOD - res;
-	if(x<0) res = TOF_TBL_HALF_PERIOD - res;
-	if(y<0) res = -res;
-
-	return res;
-}
-
-
 /*
 Process four DCS images, with offset_mm in millimeters. With clk_div=1, does the calculation at fled=20MHz (unamb range = 7.5m). Larger clk_div
 multiplies the result.
 */
 
-void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_dcs_t *in, int offset_mm, int clk_div)
+void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, int offset_mm, int clk_div)
 {
 	int16_t offset = offset_mm/clk_div;
 
@@ -690,7 +667,7 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_dcs_t *in, in
 				if(dist_i < 0) dist_i += TOF_TBL_PERIOD;
 				else if(dist_i > TOF_TBL_PERIOD) dist_i -= TOF_TBL_PERIOD;
 				
-				dist_i *= config.clk_div;
+				dist_i *= clk_div;
 
 				ampl = 1+sqrt(sq(dcs20)+sq(dcs31))/23;
 
@@ -707,91 +684,6 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_dcs_t *in, in
 	}
 }
 
-void tof_calc_dist(uint16_t *dist_out, epc_dcs_t *in, int offset_mm, int clk_div)
-{
-	int16_t offset = offset_mm/clk_div;
-
-	for(int i=0; i < 160*60; i++)
-	{
-		uint16_t dist = 0;
-
-		int16_t dcs0 = ((in->dcs[0].img[i]&0b0011111111111100)>>2)-2048;
-		int16_t dcs1 = ((in->dcs[1].img[i]&0b0011111111111100)>>2)-2048;
-		int16_t dcs2 = ((in->dcs[2].img[i]&0b0011111111111100)>>2)-2048;
-		int16_t dcs3 = ((in->dcs[3].img[i]&0b0011111111111100)>>2)-2048;
-
-		if(dcs0 < -2047 || dcs0 > 2046 || dcs1 < -2047 || dcs1 > 2046 || dcs2 < -2047 || dcs2 > 2046 || dcs3 < -2047 || dcs3 > 2046)
-		{
-			dist = 65535;
-		}
-		else if((in->dcs[0].img[i]&1) || (in->dcs[1].img[i]&1) ||
-		   (in->dcs[2].img[i]&1) || (in->dcs[3].img[i]&1))
-		{
-			dist = 65535;
-		}
-		else
-		{
-			int16_t dcs31 = dcs3-dcs1;
-			int16_t dcs20 = dcs2-dcs0;
-
-			// Use the lookup table to perform atan:
-
-			int16_t dcs31_mod, dcs20_mod;
-
-			if(dcs31<0)
-				dcs31_mod = -dcs31;
-			else
-				dcs31_mod = dcs31;
-
-			if(dcs20<0)
-				dcs20_mod = -dcs20;
-			else
-				dcs20_mod = dcs20;
-
-			int swapped = 0;
-			if(dcs20_mod<dcs31_mod)
-			{
-				swapped = 1;
-				int16_t tmp = dcs20_mod;
-				dcs20_mod = dcs31_mod;
-				dcs31_mod = tmp;
-			}
-
-			if(dcs20_mod == 0)
-			{
-				dist = 65534;
-			}
-			else
-			{
-
-				int idx = (dcs31_mod*(TOF_TBL_LEN-1))/dcs20_mod;
-
-				int32_t dist_i = tof_tbl[idx];
-				if(swapped) dist_i = TOF_TBL_QUART_PERIOD - dist_i;
-				if(dcs20<0) dist_i = TOF_TBL_HALF_PERIOD - dist_i;
-				if(dcs31<0) dist_i = -dist_i;
-
-				dist_i += offset;
-
-				if(dist_i < 0) dist_i += TOF_TBL_PERIOD;
-				else if(dist_i > TOF_TBL_PERIOD) dist_i -= TOF_TBL_PERIOD;
-				
-				dist_i *= config.clk_div;
-
-				int ampl = sq(dcs20)+sq(dcs31);
-
-				if(ampl < sq(75)*2)
-					dist = 65534;
-				else
-					dist = dist_i;
-
-			}
-
-		}
-		dist_out[i] = dist;
-	}
-}
-
 
 /*
 Process eight DCS images, with offset_mm in millimeters. With clk_div=1, does the calculation at fled=20MHz (unamb range = 7.5m). Larger clk_div
@@ -799,7 +691,7 @@ multiplies the result.
 */
 
 #define HDR_SWITCHOVER 1600
-void tof_calc_dist_hdr(uint16_t *dist_out, epc_dcs_t *in_s, epc_dcs_t *in_l, int offset_mm, int clk_div)
+void tof_calc_dist_hdr(uint16_t *dist_out, epc_4dcs_t *in_s, epc_4dcs_t *in_l, int offset_mm, int clk_div)
 {
 	int16_t offset = offset_mm/clk_div;
 
@@ -886,269 +778,265 @@ void tof_calc_dist_hdr(uint16_t *dist_out, epc_dcs_t *in_s, epc_dcs_t *in_l, int
 	}
 }
 
-int auto_bw_exp = 1000;
-int auto_dcs_exp = 1000;
-
-#if 0
-void epc_automatic()
+typedef struct __attribute__((packed))
 {
+	uint8_t bw[EPC_XS*EPC_YS];
+	uint16_t dist[EPC_XS*EPC_YS];
+	uint8_t ampl[EPC_XS*EPC_YS];
+	uint16_t calc_time; // 0.1ms units
+} spi_tof_frame_t;
 
-	epc_i2c_init();
+volatile spi_tof_frame_t spitof;
 
-	{
-		epc_wrbuf[0] = 0xcb;
-		epc_wrbuf[1] = 0b01101111; // saturation bit, split mode, gated dclk, ESM
-		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-		while(epc_i2c_is_busy());
-	}
-
-	{
-		epc_wrbuf[0] = 0x90;
-		epc_wrbuf[1] = 0b11001000;
-		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-		while(epc_i2c_is_busy());
-	}
-
-	{
-		epc_wrbuf[0] = 0x92;
-		epc_wrbuf[1] = 0b11000100;
-		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-		while(epc_i2c_is_busy());
-	}
-
-/*
-	{
-		epc_wrbuf[0] = 0xcc;
-		epc_wrbuf[1] = 1<<7; //saturate data;
-		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-		while(epc_i2c_is_busy());
-	}
-*/
-
-	EPCLEDV_ON();
-
-	delay_ms(100);
-
-	epc_dcmi_init();
-
-	// dummy grayscale frame
-	{
-		dcmi_start_dma(&img_mono, (EPC_XS*EPC_YS*2)/4+1);
-		trig();
-		delay_ms(100);
-	}
+#define SIZEOF_MONO (EPC_XS*EPC_YS*2)
+#define SIZEOF_2DCS (EPC_XS*EPC_YS*2*2)
+#define SIZEOF_4DCS (EPC_XS*EPC_YS*2*4)
 
 
-	while(1)
-	{
-
-/*
-		{
-			epc_wrbuf[0] = 0x8b;
-			epc_wrbuf[1] = config.pll_shift;
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-		{
-			epc_wrbuf[0] = 0x73;
-			epc_wrbuf[1] = config.dll_shift;
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-		{
-			epc_wrbuf[0] = 0xae;
-			epc_wrbuf[1] = (config.dll_shift>0)?0x04:0x01;
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-*/
-
-		/*
-
-			Dealiasing happens at 37.5m, 15.0m and 7.5m ranges. Using three frequencies (instead of two) furher helps eliminate HF modulated light sources such as some CCFL and LED lamps,
-			and further confirm aliasing never happens. Shortest beat distance of the three is at 75.0m, which shouldn't be reached by the LEDs, even with highly reflective targets.
-			(Maximum design range = 15m with 50% reflective targets -> 1250% reflectance would be needed for interference at 75 meters!)
-
-		*/
-
-		/*
-			Instead of simple single register for the integration time with sufficient resolution, the sensor
-			implements a 16-bit value with a 10-bit multiplier for said value.
-
-			Further, the value is specified valid only when (val+1)%4 == 0.
-
-			We utilize this register in HDR modes by keeping the integration time register but changing the multiplier.
-		*/
-
-
-/*
-	Sequence:
-
-	There is (barely) not enough memory to keep two sets of complete HDR acquisition (16 DCS frames) in memory to process the first set
-	while the second is being acquired. If we calculate the HDR set (8 frames) after it's acquired, we are ok.
-
-	We really want to minimize any delay between the aqcuisitions, so the calculation can start even before the DMA is finished.
-
-	Also, we can start aqcuiring a bit in advance as we know the exposure takes some time, and even when the data starts coming, it's
-	the head, and we are processing the tail.
-
-	s = short exposure time
-	l = long exposure time
-	ambient comp = frame with ambient light purely for the compensation algorithm, same exposure than with short dcs
-
-
-Imaging:     (ambient comp s)    (37.5m s) (37.5m l)          (7.5m s) (7.5m l)          (15.0m s) (15.0m l)  (ambient loooong)
-Processing:                                 (dist 37.5m composite)       (dist 7.5m composite)      (dist 15.0m composite) (dealiasing and corrections, final composite, no hurry..........)
-*/
-
-
-		// First img is ambient light, clkdiv for 37.5m is used here.
-		{
-			epc_wrbuf[0] = 0x85;
-			epc_wrbuf[1] = 1-1; //5-1; // 37.5m (37.470m) unambiguity range
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-		{
-			epc_wrbuf[0] = 0x90;
-			epc_wrbuf[1] = 0b11001000; // leds disabled
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-		{
-			epc_wrbuf[0] = 0x92;
-			epc_wrbuf[1] = 0b11000100; // greyscale modulation
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-		{
-			int intlen = (auto_bw_exp<<2)-1;
-			epc_wrbuf[0] = 0xA1;
-			epc_wrbuf[1] = 20;
-			epc_wrbuf[2] = (intlen&0xff00)>>8;
-			epc_wrbuf[3] = intlen&0xff;
-
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
-			while(epc_i2c_is_busy());
-		}
-
-		dcmi_start_dma(&img_mono, (EPC_XS*EPC_YS*2)/4+1);
-
-		trig();
-
-		GLED_ON();
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
-		GLED_OFF();
-
-		{
-			epc_wrbuf[0] = 0x90;
-			epc_wrbuf[1] = 0b11101000; // LED2 output on
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-		{
-			epc_wrbuf[0] = 0x92;
-			epc_wrbuf[1] = 0b00110100; // Sinusoidal 4DCS modulation
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-
-		// Short exp
-		{
-			int intlen = (auto_dcs_exp<<2)-1;
-			epc_wrbuf[0] = 0xA1;
-			epc_wrbuf[1] = 2;
-			epc_wrbuf[2] = (intlen&0xff00)>>8;
-			epc_wrbuf[3] = intlen&0xff;
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
-			while(epc_i2c_is_busy());
-		}
-
-		dcmi_start_dma(&img_dcs[0].dcs[0], 4*((EPC_XS*EPC_YS*2)/4+1));
-
-		trig();
-
-		GLED_ON();
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
-		GLED_OFF();
-
-
-		// Long exp
-		{
-			int intlen = (auto_dcs_exp<<2)-1;
-			epc_wrbuf[0] = 0xA1;
-			epc_wrbuf[1] = 16*2;
-			epc_wrbuf[2] = (intlen&0xff00)>>8;
-			epc_wrbuf[3] = intlen&0xff;
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
-			while(epc_i2c_is_busy());
-		}
-
-		dcmi_start_dma(&img_dcs[1].dcs[0], 4*((EPC_XS*EPC_YS*2)/4+1));
-
-		trig();
-
-		GLED_ON();
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
-		GLED_OFF();
-
-
-		static uint8_t sync_packet[8] = {0xff,0xff,0xff,0xff,  0xff,0xff,0x12,0xab};
-		uart_send_blocking_crc(sync_packet, 0xaa, 8);
-		delay_ms(5);
-
-		// image data DMA is done at this point, data is not going to change anymore, so dcache is okay to use, just invalidate it first:
-		SCB_InvalidateDCache();
-
-		static uint8_t txbuf[EPC_XS*EPC_YS*2+2];
-
-		{
-			int i = 0;
-			for(int yy=0; yy < 60; yy++)
-			{
-				for(int xx=0; xx < 160; xx+=2)
-				{
-					uint16_t val1 = img_mono.img[yy*EPC_XS+xx];
-					uint16_t lum1 = ((val1&0b0011111111111100)>>2);
-					uint16_t val2 = img_mono.img[yy*EPC_XS+xx+1];
-					uint16_t lum2 = ((val2&0b0011111111111100)>>2);
-					txbuf[i++] = (lum1&0xff0)>>4;
-					txbuf[i++] = (lum1&0xf)<<4 | (lum2&0xf00)>>8;
-					txbuf[i++] = (lum2&0xff);
-				}
-			}
-			uart_send_blocking_crc(txbuf, 0x01, i);
-			delay_ms(5);
-		}
-
-		{
-			timer_10k = 0;
-
-			static uint16_t calc_dist[EPC_XS*EPC_YS+1]; // +1 for calc time
-
-			tof_calc_dist_hdr(calc_dist, &img_dcs[0], &img_dcs[1], -5100, 1);
-
-			int tooktime = timer_10k;
-			calc_dist[EPC_YS*EPC_XS] = (uint16_t)tooktime;
-
-			uart_send_blocking_crc((uint8_t*)calc_dist, 0x80, 2*EPC_YS*EPC_XS+2);
-			delay_ms(5);
-		}
-
-
-	}
-
+void epc_clk_div(int div)
+{
+	epc_wrbuf[0] = 0x85;
+	epc_wrbuf[1] = div-1;
+	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 }
 
-#ifdef COMPILE_TEST
+void epc_dis_leds()
+{
+	epc_wrbuf[0] = 0x90;
+	epc_wrbuf[1] = 0b11001000; // leds disabled
+	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+}
+
+void epc_ena_leds()
+{
+	epc_wrbuf[0] = 0x90;
+	epc_wrbuf[1] = 0b11101000; // LED2 output on
+	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+}
+
+void epc_greyscale()
+{
+	epc_wrbuf[0] = 0x92;
+	epc_wrbuf[1] = 0b11000100; // greyscale modulation
+	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+}
+
+void epc_2dcs()
+{
+	epc_wrbuf[0] = 0x92;
+	epc_wrbuf[1] = 0b00010100; // 2dcs modulation
+	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+}
+
+void epc_4dcs()
+{
+	epc_wrbuf[0] = 0x92;
+	epc_wrbuf[1] = 0b00110100; // 4dcs modulation
+	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+}
+
+void epc_intlen(uint8_t multiplier, uint16_t time)
+{
+	int intlen = ((int)time<<2)-1;
+	epc_wrbuf[0] = 0xA1;
+	epc_wrbuf[1] = multiplier;
+	epc_wrbuf[2] = (intlen&0xff00)>>8;
+	epc_wrbuf[3] = intlen&0xff;
+
+	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
+}
+
+void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int threshold /*mm*/, int offset_mm, int clk_div)
+{
+	int16_t offset = offset_mm/clk_div;
+
+	for(int yy = 0; yy < EPC_YS; yy++)
+	{
+		for(int xx = 0; xx < EPC_XS; xx++)
+		{
+			int16_t dcs0 = ((in->dcs[0].img[i]&0b0011111111111100)>>2)-2048;
+			int16_t dcs1 = ((in->dcs[1].img[i]&0b0011111111111100)>>2)-2048;
+
+			if((in->dcs[0].img[i]&1) || (in->dcs[1].img[i]&1) || dcs0 < -2047 || dcs0 > 2046 || dcs1 < -2047 || dcs1 > 2046)
+			{
+				// Overexp - it's ok, probably not too far.
+			}
+			else
+			{
+				// Use the lookup table to perform atan:
+
+				int16_t dcs1_mod, dcs0_mod;
+
+				if(dcs1<0)
+					dcs1_mod = -dcs1;
+				else
+					dcs1_mod = dcs1;
+
+				if(dcs0<0)
+					dcs0_mod = -dcs0;
+				else
+					dcs0_mod = dcs0;
+
+				int swapped = 0;
+				if(dcs0_mod<dcs1_mod)
+				{
+					swapped = 1;
+					int16_t tmp = dcs0_mod;
+					dcs0_mod = dcs1_mod;
+					dcs1_mod = tmp;
+				}
+
+				int32_t dist_i;
+				int ampl_low = 0;
+				if(sqrt(sq(dcs0)+sq(dcs1)) < 100 || dcs0_mod == 0 /* should always be true if the first one is: todo: prove*/)
+				{
+					// amplitude too low
+					ampl_low = 1;
+				}
+				else
+				{
+					int idx = (dcs1_mod*(TOF_TBL_LEN-1))/dcs0_mod;
+
+					dist_i = tof_tbl[idx];
+					if(swapped) dist_i = TOF_TBL_QUART_PERIOD - dist_i;
+					if(dcs0<0) dist_i = TOF_TBL_HALF_PERIOD - dist_i;
+					if(dcs1<0) dist_i = -dist_i;
+
+					dist_i += offset;
+
+					if(dist_i < 0) dist_i += TOF_TBL_PERIOD;
+					else if(dist_i > TOF_TBL_PERIOD) dist_i -= TOF_TBL_PERIOD;
+				
+					dist_i *= clk_div;
+
+				}
+
+				if(ampl_low || dist_i > threshold)
+				{
+					//  ooo
+					//  oxo
+					//  ooo
+					out[yy*EPC_XS+xx] = 1;
+					if(xx > 0)
+					{
+						//  ooo
+						//  xoo
+						//  ooo
+						out[yy*EPC_XS+xx-1] = 1;
+						//  xoo
+						//  ooo
+						//  ooo
+						if(yy > 0) out[(yy-1)*EPC_XS+xx-1] = 1;
+						//  ooo
+						//  ooo
+						//  xoo
+						if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx-1] = 1;
+					}
+					if(xx < EPC_XS-1)
+					{
+						//  ooo
+						//  oox
+						//  ooo
+						out[yy*EPC_XS+xx+1] = 1;
+						//  oox
+						//  ooo
+						//  ooo
+						if(yy > 0) out[(yy-1)*EPC_XS+xx+1] = 1;
+						//  ooo
+						//  ooo
+						//  oox
+						if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx+1] = 1;
+					}
+
+					//  oxo
+					//  ooo
+					//  ooo
+					if(yy > 0) out[(yy-1)*EPC_XS+xx] = 1;
+
+					//  ooo
+					//  ooo
+					//  oxo
+					if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx] = 1;
+				}
+
+			}
+
+
+
+		}
+
+
+	}
+}
+
+
+
+
+
+
+
+void calc_interference_ignore_from_2dcs(uint8_t *out, epc_4dcs_t *in, int threshold)
+{
+	for(int yy = 0; yy < EPC_YS; yy++)
+	{
+		for(int xx = 0; xx < EPC_XS; xx++)
+		{
+			int16_t dcs0 = ((in->dcs[0].img[yy*EPC_XS+xx]&0b0011111111111100)>>2)-2048;
+			int16_t dcs1 = ((in->dcs[1].img[yy*EPC_XS+xx]&0b0011111111111100)>>2)-2048;
+
+			if( (in->dcs[0].img[yy*EPC_XS+xx]&1) || (in->dcs[1].img[yy*EPC_XS+xx]&1) ||
+			    dcs0 < -1*threshold || dcs0 > threshold || dcs1 < -1*threshold || dcs1 > threshold)
+			{
+				//  ooo
+				//  oxo
+				//  ooo
+				out[yy*EPC_XS+xx] = 1;
+				if(xx > 0)
+				{
+					//  ooo
+					//  xoo
+					//  ooo
+					out[yy*EPC_XS+xx-1] = 1;
+					//  xoo
+					//  ooo
+					//  ooo
+					if(yy > 0) out[(yy-1)*EPC_XS+xx-1] = 1;
+					//  ooo
+					//  ooo
+					//  xoo
+					if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx-1] = 1;
+				}
+				if(xx < EPC_XS-1)
+				{
+					//  ooo
+					//  oox
+					//  ooo
+					out[yy*EPC_XS+xx+1] = 1;
+					//  oox
+					//  ooo
+					//  ooo
+					if(yy > 0) out[(yy-1)*EPC_XS+xx+1] = 1;
+					//  ooo
+					//  ooo
+					//  oox
+					if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx+1] = 1;
+				}
+
+				//  oxo
+				//  ooo
+				//  ooo
+				if(yy > 0) out[(yy-1)*EPC_XS+xx] = 1;
+
+				//  ooo
+				//  ooo
+				//  oxo
+				if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx] = 1;
+			}
+		}
+	}
+}
+
+
 void epc_test()
 {
 	char printbuf[64];
@@ -1159,73 +1047,49 @@ void epc_test()
 	delay_ms(100);
 	EPCNEG10V_ON();
 	delay_ms(100);
-	EPC_RSTN_HIGH();
+	EPC01_RSTN_HIGH();
 	delay_ms(300);
 
 
-	uart_print_string_blocking("epc_i2c_init...");
 	epc_i2c_init();
-	uart_print_string_blocking("ok\r\n");
 
-	uart_print_string_blocking("read IC type & version...");
-	epc_i2c_read(EPC02_ADDR, 0x00, epc_rdbuf, 2);
-
-	while(epc_i2c_is_busy());
-	uart_print_string_blocking("type=");
-	o_utoa8_fixed(epc_rdbuf[0], printbuf); uart_print_string_blocking(printbuf);
-	uart_print_string_blocking(" version=");
-	o_utoa8_fixed(epc_rdbuf[1], printbuf); uart_print_string_blocking(printbuf);
-	uart_print_string_blocking("\r\n");
-
-	uart_print_string_blocking("read embedded sync data labels... ");
-	epc_i2c_read(EPC02_ADDR, 0x1c, epc_rdbuf, 4);
-	while(epc_i2c_is_busy());
-	for(int i=0; i<4; i++)
+#if 0
 	{
-		o_utoa8_fixed(epc_rdbuf[i], printbuf); uart_print_string_blocking(printbuf);
-		uart_print_string_blocking(" ");
+		epc_wrbuf[0] = 0x89; 
+		epc_wrbuf[1] = (6 /*TCMI clock div 2..16*/ -1) | 0<<7 /*add clock delay*/;
+		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+		while(epc_i2c_is_busy());
+		uart_print_string_blocking("ok\r\n");
 	}
-
-	uart_print_string_blocking("\r\n");
-
-	//while(DBG_BUT()) ;
-
+#endif
 
 	{
-		epc_wrbuf[0] = 0xcb;
+		epc_wrbuf[0] = 0xcb; // i2c&tcmi control
 		epc_wrbuf[1] = 0b01101111; // saturation bit, split mode, gated dclk, ESM
-		uart_print_string_blocking("write i2c&tcmi control reg...");
 		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
-		uart_print_string_blocking("ok\r\n");
 	}
 
 	{
-		epc_wrbuf[0] = 0x90;
+		epc_wrbuf[0] = 0x90; // led driver control
 		epc_wrbuf[1] = 0b11001000;
-		uart_print_string_blocking("write led driver control...");
 		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
-		uart_print_string_blocking("ok\r\n");
 	}
 
 	{
-		epc_wrbuf[0] = 0x92;
-		epc_wrbuf[1] = 0b11000100;
-		uart_print_string_blocking("write modulation select (greyscale)...");
+		epc_wrbuf[0] = 0x92; // modulation select
+		epc_wrbuf[1] = 0b11000100; // grayscale
 		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
-		uart_print_string_blocking("ok\r\n");
 	}
 
 /*
 	{
-		epc_wrbuf[0] = 0xcc;
+		epc_wrbuf[0] = 0xcc; // tcmi polarity settings
 		epc_wrbuf[1] = 1<<7; //saturate data;
-		uart_print_string_blocking("write tcmi polarity settings...");
 		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
-		uart_print_string_blocking("ok\r\n");
 	}
 */
 
@@ -1233,338 +1097,219 @@ void epc_test()
 
 	delay_ms(100);
 
+	EPC_SEL0();
 
-	uart_print_string_blocking("epc_dcmi_init...");
 	epc_dcmi_init();
-	uart_print_string_blocking("ok\r\n");
 
+	// Take a dummy frame, which will eventually output the end-of-frame sync marker, to get the DCMI sync marker parser in the right state
 	{
-		uart_print_string_blocking("write shutter (for dummy frame)...");
-		dcmi_start_dma(&img_mono, (EPC_XS*EPC_YS*2)/4+1);
+		dcmi_start_dma(&img_mono, SIZEOF_MONO);
 		trig();
 		delay_ms(100);
-		uart_print_string_blocking("ok\r\n");
 	}
-
-
-//	uart_print_string_blocking("Press button S1 to start (with binary communication)");
-	uart_print_string_blocking("\r\n");
-
-
-//	delay_ms(300);
 
 	while(1)
 	{
-
-		// fetch config:
-
-		static int conf_errors = 0;
-		if(DMA1_Stream1->NDTR == sizeof(config_t))
+		while(!new_rx)
 		{
-			config_t pending;
-			memcpy(&pending, &rx_config, sizeof(config_t));
-			if(DMA1_Stream1->NDTR == sizeof(config_t))
-			{
-				// config was unaccessed before and after copy - not being modified during copy.
-				apply_config(&pending);
-				conf_errors=0;
-			}
-			else
-			{
-				conf_errors++;
-			}
+			LED_ON();
+			delay_us(1);
+			LED_OFF();
+			delay_us(20);
 		}
-		else
-		{
-			conf_errors++;
-		}
-		epc_wrbuf[0] = 0x99;
+		new_rx = 0;
 
-		if(conf_errors > 2)
-		{
-			conf_errors = 0;
-			// Very improbable that conf rx happens during the short unallowed period three times in a row - it's just stuck midway transfer (due to missed or excess bytes) - reset DMA.
+		static uint8_t ignore[EPC_XS*EPC_YS];
+		static epc_4dcs_t dcsa, dcsb;
 
-			DMA1_Stream1->CR = 4UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<18 /*double buffer OFF*/ | 1UL<<8 /*circular ON*/ |
-					   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
-					   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/ | 0UL<<4 /* Transfer complete interrupt*/;
-			while(DMA1_Stream1->CR & 1UL) ;
-			DMA1_Stream1->NDTR = sizeof(config_t);
-			DMA_CLEAR_INTFLAGS(DMA1, 1);
-			DMA1_Stream1->CR |= 1; // Enable DMA
-		}
+		memset(ignore, 0, sizeof(ignore));
 
-
-
-		//uart_print_string_blocking("RISR="); o_utoa32(DCMI->RISR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking(" ");
-		//uart_print_string_blocking("NDTR="); o_utoa32(DMA2_Stream7->NDTR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking(" ");
-
-		{
-			epc_wrbuf[0] = 0x8b;
-			epc_wrbuf[1] = config.pll_shift;
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
+		/*
+			6.66 MHz
+			LEDS OFF
+			2DCS
+			Short exp
+			Purpose: to find other HF AC sources or other interferences to be ignored
+		*/
+		epc_clk_div(3);
+		while(epc_i2c_is_busy());
+		epc_dis_leds();
+		while(epc_i2c_is_busy());
+		epc_intlen(8, 200);
+		while(epc_i2c_is_busy());
 
 
-		{
-			epc_wrbuf[0] = 0x73;
-			epc_wrbuf[1] = config.dll_shift;
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-		{
-			epc_wrbuf[0] = 0xae;
-			epc_wrbuf[1] = (config.dll_shift>0)?0x04:0x01;
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-
-		{
-			epc_wrbuf[0] = 0x85;
-			epc_wrbuf[1] = config.clk_div-1;
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-		{
-			epc_wrbuf[0] = 0x90;
-			epc_wrbuf[1] = 0b11001000; // leds disabled
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-		{
-			epc_wrbuf[0] = 0x92;
-			epc_wrbuf[1] = 0b11000100; // greyscale modulation
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-		{
-			int intlen = ((int)config.bw_int_len<<2)-1;
-			epc_wrbuf[0] = 0xA1;
-			epc_wrbuf[1] = 120/config.clk_div;
-			epc_wrbuf[2] = (intlen&0xff00)>>8;
-			epc_wrbuf[3] = intlen&0xff;
-
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
-			while(epc_i2c_is_busy());
-		}
-
-
-
-		dcmi_start_dma(&img_mono, (EPC_XS*EPC_YS*2)/4+1);
-
+		dcmi_start_dma(dcsa, SIZEOF_2DCS);
 		trig();
-
-		GLED_ON();
+		LED_ON();
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
-		GLED_OFF();
+		LED_OFF();
 
 
-		{
-			epc_wrbuf[0] = 0x90;
-			epc_wrbuf[1] = 0b11101000; // LED2 output on
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
+		/*
+			20 MHz
+			LEDS OFF
+			2DCS
+			Short exp
+			Purpose: Same as the previous, at different freq
+		*/
+		epc_clk_div(1);
+		while(epc_i2c_is_busy());
+		epc_intlen(24, 200);
+		while(epc_i2c_is_busy());
 
-		{
-			epc_wrbuf[0] = 0x92;
-			epc_wrbuf[1] = 0b00110100; // Sinusoidal 4DCS modulation
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-			while(epc_i2c_is_busy());
-		}
-
-		{
-			int intlen = ((int)config.dist_int_len<<2)-1;
-			epc_wrbuf[0] = 0xA1;
-			epc_wrbuf[1] = 24/config.clk_div;
-			epc_wrbuf[2] = (intlen&0xff00)>>8;
-			epc_wrbuf[3] = intlen&0xff;
-			epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
-			while(epc_i2c_is_busy());
-		}
-
-		dcmi_start_dma(&img_dcs[0].dcs[0], 4*((EPC_XS*EPC_YS*2)/4+1));
-
+		dcmi_start_dma(dcsb, SIZEOF_2DCS);
 		trig();
+		LED_ON();
 
-		GLED_ON();
+		// Calculate the previous
+		calc_interference_ignore_from_2dcs(ignore, dcsa, 10);
+
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
-		GLED_OFF();
+		LED_OFF();
 
 
 
-		static uint8_t sync_packet[8] = {0xff,0xff,0xff,0xff,  0xff,0xff,0x12,0xab};
-		uart_send_blocking_crc(sync_packet, 0xaa, 8);
-		delay_ms(5);
+		/*
+			20 MHz
+			LEDS OFF
+			MONOCHROME
+			Long exp
+			Purpose: General purpose monochrome, HDR long
+		*/
 
-		// image data DMA is done at this point, data is not going to change anymore, so dcache is okay to use, just invalidate it first:
-		SCB_InvalidateDCache();
+		epc_greyscale();
+		while(epc_i2c_is_busy());
 
-		static uint8_t txbuf[EPC_XS*EPC_YS*2+2];
+		epc_intlen(120, 1000);
+		while(epc_i2c_is_busy());
 
-#define SEND_BW
-//#define SEND_DCS
-//#define CALC_DIST_FLOAT
-#define CALC_DIST_TABLE
+		dcmi_start_dma(&img_mono, SIZEOF_MONO);
 
-#ifdef SEND_BW
+		trig();
+		LED_ON();
+
+		// Calculate the previous
+		calc_interference_ignore_from_2dcs(ignore, dcsb, 10);
+
+		while(!epc_capture_finished) ;
+		epc_capture_finished = 0;
+		LED_OFF();
+
+
+		/*
+			20 MHz
+			LEDS OFF
+			MONOCHROME
+			Short exp
+			Purpose: General purpose monochrome, HDR short
+		*/
+
+		epc_intlen(120, 250);
+		while(epc_i2c_is_busy());
+
+		dcmi_start_dma(&img_mono, SIZEOF_MONO);
+
+		trig();
+		LED_ON();
+		while(!epc_capture_finished) ;
+		epc_capture_finished = 0;
+		LED_OFF();
+
+
+		/*
+			6.66 MHz (wrap at 22.5m)
+			LEDS ON
+			2DCS
+			Long exp
+			Purpose: Long-distance approximate readings for ignoring too-far points.
+		*/
+
+		epc_clk_div(3);
+		while(epc_i2c_is_busy());
+
+		epc_ena_leds();
+		while(epc_i2c_is_busy());
+
+		epc_2dcs();
+		while(epc_i2c_is_busy());
+
+		epc_intlen(8, 2000);
+		while(epc_i2c_is_busy());
+
+		dcmi_start_dma(dcsa, SIZEOF_4DCS);
+		trig();
+		LED_ON();
+		while(!epc_capture_finished) ;
+		epc_capture_finished = 0;
+		LED_OFF();
+
+
+		/*
+			6.66 MHz (wrap at 22.5m)
+			LEDS ON
+			2DCS
+			Short exp
+			Purpose: Same as previous, but if there are super-reflective things like 
+				traffic signals, they may overexpose the previous one.
+		*/
+
+
+		epc_intlen(8, 500);
+		while(epc_i2c_is_busy());
+
+		dcmi_start_dma(dcsb, SIZEOF_4DCS);
+		trig();
+		LED_ON();
+
+		// Calculate the previous
+		// We don't need fancy HDR combining here, since both exposures simply update the ignore list.
+		calc_toofar_ignore_from_2dcs(ignore, dcsa, 6000);
+
+		while(!epc_capture_finished) ;
+		epc_capture_finished = 0;
+		LED_OFF();
+
+
+
+
+
+		__DSB(); __ISB();
+
+
+
 		{
-			int i = 0;
-			for(int yy=0; yy < 60; yy++)
+			for(int i=0; i < 160*60; i++)
 			{
-				for(int xx=0; xx < 160; xx+=2)
-				{
-					uint16_t val1 = img_mono.img[yy*EPC_XS+xx];
-					uint16_t lum1 = ((val1&0b0011111111111100)>>2);
-					uint16_t val2 = img_mono.img[yy*EPC_XS+xx+1];
-					uint16_t lum2 = ((val2&0b0011111111111100)>>2);
-					txbuf[i++] = (lum1&0xff0)>>4;
-					txbuf[i++] = (lum1&0xf)<<4 | (lum2&0xf00)>>8;
-					txbuf[i++] = (lum2&0xff);
-				}
+				uint16_t val = img_mono.img[i];
+				uint16_t lum = ((val&0b0011111111111100)>>2);
+				spitof.bw[i] = lum>>4;
 			}
-			uart_send_blocking_crc(txbuf, 0x01, i);
-			delay_ms(5);
-		}
-#endif
-
-#ifdef SEND_DCS
-		for(int dcs=0; dcs<4; dcs++)
-		{
-			int i = 0;
-			for(int yy=0; yy < 60; yy++)
-			{
-				for(int xx=0; xx < 160; xx+=2)
-				{
-					uint16_t val1 = img_dcs[0].dcs[dcs].img[yy*EPC_XS+xx];
-					uint16_t lum1 = ((val1&0b0011111111111100)>>2);
-					uint16_t val2 = img_dcs[0].dcs[dcs].img[yy*EPC_XS+xx+1];
-					uint16_t lum2 = ((val2&0b0011111111111100)>>2);
-					txbuf[i++] = (lum1&0xff0)>>4;
-					txbuf[i++] = (lum1&0xf)<<4 | (lum2&0xf00)>>8;
-					txbuf[i++] = (lum2&0xff);
-				}
-			}
-			uart_send_blocking_crc(txbuf, 0x10+dcs, i);
-			delay_ms(5);
-		}
-#endif
-
-	// 260ms with software FP
-	// 28ms with HW FP
-	// 23ms with amplitude calculation optimized
-	// 6.5ms with fixed point atan table
-
-
-#ifdef CALC_DIST_FLOAT
-
-
-		{
-			int i = 0;
-
-			timer_10k = 0;
-
-			float fled = 20000000.0 / config.clk_div;
-			float mult = 299792458.0/2.0*1.0/(2.0*M_PI*fled); 
-			float unamb = 299792458.0/2.0*1.0/(fled); 
-
-			for(int yy=0; yy < 60; yy++)
-			{
-				for(int xx=0; xx < 160; xx++)
-				{
-					uint16_t dist;
-//					if((img_dcs[0].dcs[0].img[yy*EPC_XS+xx]&1) || (img_dcs[0].dcs[1].img[yy*EPC_XS+xx]&1) ||
-//					   (img_dcs[0].dcs[2].img[yy*EPC_XS+xx]&1) || (img_dcs[0].dcs[3].img[yy*EPC_XS+xx]&1))
-//					{
-//						dist = 65535;
-//					}
-
-					int16_t dcs0 = ((img_dcs[0].dcs[0].img[yy*EPC_XS+xx]&0b0011111111111100)>>2)-2048;
-					int16_t dcs1 = ((img_dcs[0].dcs[1].img[yy*EPC_XS+xx]&0b0011111111111100)>>2)-2048;
-					int16_t dcs2 = ((img_dcs[0].dcs[2].img[yy*EPC_XS+xx]&0b0011111111111100)>>2)-2048;
-					int16_t dcs3 = ((img_dcs[0].dcs[3].img[yy*EPC_XS+xx]&0b0011111111111100)>>2)-2048;
-
-					if(dcs0 < -2047 || dcs0 > 2046 || dcs1 < -2047 || dcs1 > 2046 || dcs2 < -2047 || dcs2 > 2046 || dcs3 < -2047 || dcs3 > 2046)
-					{
-						dist = 65535;
-					}
-					else if((img_dcs[0].dcs[0].img[yy*EPC_XS+xx]&1) || (img_dcs[0].dcs[1].img[yy*EPC_XS+xx]&1) ||
-					   (img_dcs[0].dcs[2].img[yy*EPC_XS+xx]&1) || (img_dcs[0].dcs[3].img[yy*EPC_XS+xx]&1))
-					{
-						dist = 65535;
-					}
-					else
-					{
-						float dcs31 = dcs3-dcs1;
-						float dcs20 = dcs2-dcs0;
-
-						float dist_f = (mult * (/*M_PI +*/ atan2(dcs31,dcs20)))+((float)config.offsets[config.clk_div]/1000.0);
-
-						if(dist_f < 0.0) dist_f += unamb;
-						else if(dist_f > unamb) dist_f -= unamb;
-
-						//float ampl = sqrt(sq(dcs20)+sq(dcs31))/2.0;
-						float ampl = sq(dcs20)+sq(dcs31);
-						if(ampl < sq(75.0)*2.0)
-							dist = 65534;
-						else
-							dist = dist_f*1000.0;
-					}
-
-					txbuf[i++] = (dist&0xff00)>>8;
-					txbuf[i++] = dist&0xff;
-				}
-			}
-			int tooktime = timer_10k;
-			txbuf[i++] = (tooktime&0xff00)>>8;
-			txbuf[i++] = tooktime&0xff;
-
-			uart_send_blocking_crc(txbuf, 0x80, i);
-			delay_ms(5);
 		}
 
 
-
-#endif
-
-#ifdef CALC_DIST_TABLE
 
 
 		{
 			timer_10k = 0;
 
-			static uint16_t calc_dist[EPC_XS*EPC_YS+1]; // +1 for calc time
-			static uint8_t  calc_ampl[EPC_XS*EPC_YS];
 
-			tof_calc_dist_ampl(calc_ampl, calc_dist, &img_dcs[0], config.offsets[config.clk_div], config.clk_div);
+			tof_calc_dist_ampl(spitof.ampl, spitof.dist, &img_dcs[0], config.offsets[config.clk_div], config.clk_div);
 
 			int tooktime = timer_10k;
-			calc_dist[EPC_YS*EPC_XS] = (uint16_t)tooktime;
-
-			uart_send_blocking_crc((uint8_t*)calc_dist, 0x80, 2*EPC_YS*EPC_XS+2);
-			uart_send_blocking_crc((uint8_t*)calc_ampl, 0x81, EPC_YS*EPC_XS);
-			delay_ms(5);
+			spitof.calc_time = tooktime;
 		}
 
 
-#endif
 
 
 	}
 
 
 }
-#endif
 
-#endif
 
 #define NUM_ADC_DATA 1
 
@@ -1577,26 +1322,7 @@ typedef struct __attribute__((packed))
 
 volatile adc_datum_t adc_data[NUM_ADC_DATA];
 
-void uart_dbg()
-{
-	static uint8_t test[10000];
-	uint8_t c = 0;
-	for(int i=0; i<10000; i++)
-	{
-		test[i] = c++;
-	}
-
-	while(1)
-	{
-		static uint8_t sync_packet[8] = {0xff,0xff,0xff,0xff,  0xff,0xff,0x12,0xab};
-		uart_send_blocking_crc(sync_packet, 0xaa, 8);
-		uart_send_blocking_crc(test, 0x30, 10000);
-
-	}
-}
-
 #define SPI_TEST_LEN 10000
-volatile uint8_t spi_test_tx[SPI_TEST_LEN];
 volatile uint8_t spi_test_rx[SPI_TEST_LEN];
 
 volatile int spi_test_cnt;
@@ -1618,10 +1344,6 @@ volatile int spi_test_cnt;
 	wasting any CPU time. The same works on the RASPI side - we don't even need to look at those 4 bytes if we don't have time to do that.
 */
 
-volatile uint32_t last_hommel;
-
-volatile int new_rx, new_rx_len;
-
 void raspi_spi_xfer_end_inthandler()
 {
 	// Triggered when cs goes high - switch DMA rx buffers, zero the tx buffer loc
@@ -1642,14 +1364,20 @@ void raspi_spi_xfer_end_inthandler()
 	while(DMA1_Stream3->CR & 1UL) ;
 
 	new_rx = 1;
-	new_rx_len = SPI_TEST_LEN - DMA1_Stream3->NDTR;
+	new_rx_len = sizeof(spitof) - DMA1_Stream3->NDTR;
 
 
 	// Check if there is the maintenance magic code:
 
-	last_hommel = *((volatile uint32_t*)&spi_test_rx[0]);
 	if(*((volatile uint32_t*)&spi_test_rx[0]) == 0x9876fedb)
 	{
+		EPC01_RSTN_LOW();
+		EPC23_RSTN_LOW();
+		EPCNEG10V_OFF();
+		EPC10V_OFF();
+		EPC5V_OFF();
+		EPCLEDV_OFF();
+		EPC_DESEL();
 		run_flasher();
 	}
 
@@ -1664,13 +1392,13 @@ void raspi_spi_xfer_end_inthandler()
 	SPI2->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/ | 1UL<<12 /*Don't Reject The Last Byte*/;
 
 	// TX DMA
-	DMA1_Stream4->NDTR = SPI_TEST_LEN;
+	DMA1_Stream4->NDTR = sizeof(spitof);
 	DMA_CLEAR_INTFLAGS(DMA1, 4);
 	DMA1_Stream4->CR |= 1; // Enable DMA
 
 	// RX DMA
 
-	DMA1_Stream3->NDTR = SPI_TEST_LEN;
+	DMA1_Stream3->NDTR = sizeof(spitof);
 	DMA_CLEAR_INTFLAGS(DMA1, 3);
 	DMA1_Stream3->CR |= 1; // Enable DMA
 
@@ -1778,9 +1506,9 @@ void main()
 
 	// Enable FPU
 
-//	SCB->CPACR |= 0b1111UL<<20;
-//	__DSB();
-//	__ISB();
+	SCB->CPACR |= 0b1111UL<<20;
+	__DSB();
+	__ISB();
 
 	RCC->AHB2ENR = 1UL<<0 /*DCMI*/;
 	RCC->APB1ENR |= 1UL<<18 /*USART3*/ | 1UL<<23 /*I2C3*/ | 1UL<<3 /*TIM5*/ | 1UL<<14 /*SPI2*/;
@@ -1908,12 +1636,6 @@ void main()
 	delay_ms(100);
 */
 
-	uint8_t c = 0x42;
-	for(int i = 0; i < SPI_TEST_LEN; i++)
-	{
-		spi_test_tx[i] = c++;
-	}
-
 	IO_ALTFUNC(GPIOB, 12, 5);
 	IO_ALTFUNC(GPIOB, 13, 5);
 	IO_ALTFUNC(GPIOB, 14, 5);
@@ -1935,11 +1657,11 @@ void main()
 
 	// TX DMA
 	DMA1_Stream4->PAR = (uint32_t)&(SPI2->DR);
-	DMA1_Stream4->M0AR = (uint32_t)&(spi_test_tx[0]);
+	DMA1_Stream4->M0AR = (uint32_t)&spitof;
 	DMA1_Stream4->CR = 0UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
 			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
 	                   1UL<<10 /*mem increment*/ | 0b01UL<<6 /*mem-to-periph*/;
-	DMA1_Stream4->NDTR = SPI_TEST_LEN;
+	DMA1_Stream4->NDTR = sizeof(spitof);
 	DMA_CLEAR_INTFLAGS(DMA1, 4);
 	DMA1_Stream4->CR |= 1; // Enable TX DMA
 
@@ -1950,7 +1672,7 @@ void main()
 	DMA1_Stream3->CR = 0UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
 			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
 	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
-	DMA1_Stream3->NDTR = SPI_TEST_LEN;
+	DMA1_Stream3->NDTR = sizeof(spitof);
 	DMA_CLEAR_INTFLAGS(DMA1, 3);
 	DMA1_Stream3->CR |= 1; // Enable RX DMA
 
@@ -1978,50 +1700,5 @@ void main()
 		CS0  = grey
 	*/
 
-	while(1)
-	{
-
-		char printbuf[64];
-		uart_print_string_blocking("SPI SR = "); o_utoa16(SPI2->SR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
-		uart_print_string_blocking("tx NDTR = "); o_utoa16(DMA1_Stream4->NDTR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
-		uart_print_string_blocking("rx NDTR = "); o_utoa16(DMA1_Stream3->NDTR, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
-		uart_print_string_blocking("spi_test_cnt = "); o_utoa16(spi_test_cnt, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
-		uart_print_string_blocking("last_hommel = "); o_utoa32(last_hommel, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
-
-		uart_print_string_blocking("timer_10k = "); o_utoa32(timer_10k, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
-
-		uart_print_string_blocking("\r\n\r\n");
-		delay_ms(100);
-
-
-		if(new_rx)
-		{
-			new_rx = 0;
-			int len = new_rx_len;
-			uart_print_string_blocking("len = "); o_utoa32(len, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking("\r\n");
-
-			for(int i=0; i<len; i++)
-			{
-				if(i%4 == 0) uart_print_string_blocking(" ");
-				if(i%32 == 0) uart_print_string_blocking("\r\n");
-				o_utoa8_hex(spi_test_rx[i], printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking(" ");
-
-			}
-
-			uart_print_string_blocking("\r\n\r\n");
-			
-		}
-
-
-//		LED_ON();
-//		delay_ms(500);
-//		LED_OFF();
-//		delay_ms(500);
-
-
-
-	}
-
-
-	//uart_dbg();
+	epc_test();
 }
