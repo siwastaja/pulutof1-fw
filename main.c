@@ -886,18 +886,16 @@ void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int thres
 					dcs1_mod = tmp;
 				}
 
-				int32_t dist_i;
-				int ampl_low = 0;
 				if(sqrt(sq(dcs0)+sq(dcs1)) < 100 || dcs0_mod == 0 /* should always be true if the first one is: todo: prove*/)
 				{
 					// amplitude too low
-					ampl_low = 1;
+					ignore_out[yy*EPC_XS+xx] = 1;
 				}
 				else
 				{
 					int idx = (dcs1_mod*(TOF_TBL_LEN-1))/dcs0_mod;
 
-					dist_i = tof_tbl[idx];
+					int32_t dist_i = tof_tbl[idx];
 					if(swapped) dist_i = TOF_TBL_QUART_PERIOD - dist_i;
 					if(dcs0<0) dist_i = TOF_TBL_HALF_PERIOD - dist_i;
 					if(dcs1<0) dist_i = -dist_i;
@@ -909,54 +907,8 @@ void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int thres
 				
 					dist_i *= clk_div;
 
-				}
-
-				if(ampl_low || dist_i > threshold)
-				{
-					//  ooo
-					//  oxo
-					//  ooo
-					out[yy*EPC_XS+xx] = 1;
-					if(xx > 0)
-					{
-						//  ooo
-						//  xoo
-						//  ooo
-						out[yy*EPC_XS+xx-1] = 1;
-						//  xoo
-						//  ooo
-						//  ooo
-						if(yy > 0) out[(yy-1)*EPC_XS+xx-1] = 1;
-						//  ooo
-						//  ooo
-						//  xoo
-						if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx-1] = 1;
-					}
-					if(xx < EPC_XS-1)
-					{
-						//  ooo
-						//  oox
-						//  ooo
-						out[yy*EPC_XS+xx+1] = 1;
-						//  oox
-						//  ooo
-						//  ooo
-						if(yy > 0) out[(yy-1)*EPC_XS+xx+1] = 1;
-						//  ooo
-						//  ooo
-						//  oox
-						if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx+1] = 1;
-					}
-
-					//  oxo
-					//  ooo
-					//  ooo
-					if(yy > 0) out[(yy-1)*EPC_XS+xx] = 1;
-
-					//  ooo
-					//  ooo
-					//  oxo
-					if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx] = 1;
+					if(dist_i > threshold)
+						ignore_out[yy*EPC_XS+xx] = 1;
 				}
 
 			}
@@ -971,11 +923,7 @@ void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int thres
 
 
 
-
-
-
-
-void calc_interference_ignore_from_2dcs(uint8_t *out, epc_4dcs_t *in, int threshold)
+void calc_interference_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int threshold)
 {
 	for(int yy = 0; yy < EPC_YS; yy++)
 	{
@@ -987,50 +935,7 @@ void calc_interference_ignore_from_2dcs(uint8_t *out, epc_4dcs_t *in, int thresh
 			if( (in->dcs[0].img[yy*EPC_XS+xx]&1) || (in->dcs[1].img[yy*EPC_XS+xx]&1) ||
 			    dcs0 < -1*threshold || dcs0 > threshold || dcs1 < -1*threshold || dcs1 > threshold)
 			{
-				//  ooo
-				//  oxo
-				//  ooo
 				out[yy*EPC_XS+xx] = 1;
-				if(xx > 0)
-				{
-					//  ooo
-					//  xoo
-					//  ooo
-					out[yy*EPC_XS+xx-1] = 1;
-					//  xoo
-					//  ooo
-					//  ooo
-					if(yy > 0) out[(yy-1)*EPC_XS+xx-1] = 1;
-					//  ooo
-					//  ooo
-					//  xoo
-					if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx-1] = 1;
-				}
-				if(xx < EPC_XS-1)
-				{
-					//  ooo
-					//  oox
-					//  ooo
-					out[yy*EPC_XS+xx+1] = 1;
-					//  oox
-					//  ooo
-					//  ooo
-					if(yy > 0) out[(yy-1)*EPC_XS+xx+1] = 1;
-					//  ooo
-					//  ooo
-					//  oox
-					if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx+1] = 1;
-				}
-
-				//  oxo
-				//  ooo
-				//  ooo
-				if(yy > 0) out[(yy-1)*EPC_XS+xx] = 1;
-
-				//  ooo
-				//  ooo
-				//  oxo
-				if(yy < EPC_YS-1) out[(yy+1)*EPC_XS+xx] = 1;
 			}
 		}
 	}
