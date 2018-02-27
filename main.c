@@ -883,8 +883,9 @@ void process_bw(uint8_t *out, epc_img_t *in)
 {
 	for(int i=0; i<EPC_XS*EPC_YS; i++)
 	{
-		int16_t lum = ((in->img[i]&0b0011111111111100)>>2);
-		out[i] = lum>>4;
+		int lum = ((in->img[i]&0b0011111111111100)>>2)-2048;
+		if(lum < 0) lum = 0; else if(lum > 2047) lum = 2047;
+		out[i] = lum>>3;
 	}
 }
 
