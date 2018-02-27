@@ -419,6 +419,10 @@ typedef struct __attribute__((packed))
 	epc_img_t dcs[2];
 } epc_2dcs_t;
 
+#define SIZEOF_MONO (sizeof(epc_img_t))  //(EPC_XS*EPC_YS*2)
+#define SIZEOF_2DCS (sizeof(epc_2dcs_t)) //(EPC_XS*EPC_YS*2*2)
+#define SIZEOF_4DCS (sizeof(epc_4dcs_t)) //(EPC_XS*EPC_YS*2*4)
+
 
 volatile int epc_capture_finished = 0;
 void epc_dcmi_dma_inthandler()
@@ -508,7 +512,7 @@ void dcmi_start_dma(void *data, int size)
 
 	DMA2_Stream7->M0AR = (uint32_t)data;
 
-	DMA2_Stream7->NDTR = size/4+1; // Num of 32-bit transfers
+	DMA2_Stream7->NDTR = size/4; // Num of 32-bit transfers
 	DMA2_Stream7->CR = 1UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 
 			   0b10UL<<13 /*32-bit mem*/ | 0b10UL<<11 /*32-bit periph*/ |
 	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/ | 1UL<<4 /* Transfer complete interrupt*/;
@@ -629,10 +633,6 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 		dist_out[i] = dist;
 	}
 }
-
-#define SIZEOF_MONO (EPC_XS*EPC_YS*2)
-#define SIZEOF_2DCS (EPC_XS*EPC_YS*2*2)
-#define SIZEOF_4DCS (EPC_XS*EPC_YS*2*4)
 
 
 void epc_clk_div(int div)
@@ -879,6 +879,14 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 }
 
 
+void process_bw(uint8_t *out, epc_img_t *in)
+{
+	for(int i=0; i<EPC_XS*EPC_YS; i++)
+	{
+		int16_t lum = ((in->img[i]&0b0011111111111100)>>2);
+		out[i] = lum>>4;
+	}
+}
 
 
 typedef struct __attribute__((packed))
@@ -899,7 +907,7 @@ typedef struct __attribute__((packed))
 
 } pulutof_frame_t;
 
-pulutof_frame_t raspi_tx;
+volatile pulutof_frame_t raspi_tx;
 
 
 void init_raspi_tx()
@@ -1002,7 +1010,6 @@ void epc_test()
 		timer_10k = 0;
 
 		raspi_tx.status = 100;
-								raspi_tx.dummy1 = 1;
 
 		memset(ignore, 0, sizeof(ignore));
 
@@ -1028,7 +1035,6 @@ void epc_test()
 		;
 
 								raspi_tx.timestamps[1] = timer_10k;
-								raspi_tx.dummy1 = 2;
 
 
 		dcmi_start_dma(&dcsa, SIZEOF_2DCS);
@@ -1040,8 +1046,6 @@ void epc_test()
 
 								raspi_tx.timestamps[2] = timer_10k;
 
-
-								raspi_tx.dummy1 = 3;
 
 
 		/*
@@ -1076,8 +1080,6 @@ void epc_test()
 
 
 								raspi_tx.timestamps[5] = timer_10k;
-
-								raspi_tx.dummy1 = 4;
 
 
 
@@ -1126,6 +1128,11 @@ void epc_test()
 
 		trig();
 		LED_ON();
+
+		// do something useful:
+
+		process_bw(raspi_tx.ambient, &mono_long);
+
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
 		LED_OFF();
@@ -1334,9 +1341,15 @@ void epc_test()
 
 		raspi_tx.status = 255;
 
-		while(timer_10k < 4000) ;
-		raspi_tx.status = 150;
-		while(timer_10k < 5000) ;
+		while(timer_10k < 10000)
+		{
+			if(new_rx)
+			{
+				new_rx = 0;
+				if(new_rx_len > 100)
+					raspi_tx.status = 150;
+			}
+		}
 
 	}
 
@@ -1660,6 +1673,11 @@ void main()
 	*/
 
 	init_raspi_tx();
+
+	uint8_t c = 0;
+	for(int i=0; i<160*60; i++)
+		raspi_tx.ambient[i] = c++;
+
 	__DSB(); __ISB();
 	SPI2->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/ | 1UL<<12 /*Don't Reject The Last Byte*/;
 
