@@ -1057,13 +1057,15 @@ void epc_test()
 								raspi_tx.timestamps[1] = timer_10k;
 
 
-		dcmi_start_dma(&dcsa, SIZEOF_MONO);
+		dcmi_start_dma(&mono_long, SIZEOF_MONO);
 		trig();
 		LED_ON();
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
 		LED_OFF();
-		if(raspi_rx[4] == 1) process_bw(raspi_tx.dbg, &dcsa.dcs[0]);
+//		if(raspi_rx[4] == 1) process_bw(raspi_tx.dbg, &mono_long);
+		process_bw(raspi_tx.ambient, &mono_long);
+
 
 								raspi_tx.timestamps[2] = timer_10k;
 
