@@ -772,6 +772,7 @@ void calc_interference_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int
 	{
 		for(int xx = 0; xx < EPC_XS; xx++)
 		{
+/*
 			int16_t dcs0 = ((in->dcs[0].img[yy*EPC_XS+xx]&0b0011111111111100)>>2)-2048;
 			int16_t dcs1 = ((in->dcs[1].img[yy*EPC_XS+xx]&0b0011111111111100)>>2)-2048;
 
@@ -780,6 +781,11 @@ void calc_interference_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int
 			{
 				ignore_out[yy*EPC_XS+xx] = 1;
 			}
+*/
+			uint16_t dcs0 = ((in->dcs[0].img[yy*EPC_XS+xx]&0b0011111111111100)>>2);
+			uint16_t dcs1 = ((in->dcs[1].img[yy*EPC_XS+xx]&0b0011111111111100)>>2);
+
+			ignore_out[yy*EPC_XS+xx] = dcs1>>4;
 		}
 	}
 }
@@ -904,11 +910,17 @@ typedef struct __attribute__((packed))
 	uint8_t  ampl[EPC_XS*EPC_YS];
 	uint8_t  ambient[EPC_XS*EPC_YS];
 
+	uint8_t dbg_id;
+	uint8_t dbg[2*EPC_XS*EPC_YS];
+
 	uint16_t timestamps[24]; // 0.1ms unit timestamps of various steps for analyzing the timing of low-level processing
 
 } pulutof_frame_t;
 
 volatile pulutof_frame_t raspi_tx;
+
+#define RASPI_RX_LEN 1000
+volatile uint8_t raspi_rx[RASPI_RX_LEN];
 
 
 void init_raspi_tx()
@@ -986,8 +998,8 @@ void epc_test()
 
 
 	static uint8_t ignore[EPC_XS*EPC_YS];
-	static epc_4dcs_t dcsa, dcsb;
-	static epc_img_t mono_long, mono_short;
+	static volatile epc_4dcs_t dcsa, dcsb;
+	static volatile epc_img_t mono_long, mono_short;
 
 	// Take a dummy frame, which will eventually output the end-of-frame sync marker, to get the DCMI sync marker parser in the right state
 	{
@@ -1008,6 +1020,8 @@ void epc_test()
 		new_rx = 0;
 */
 
+		raspi_tx.dbg_id = raspi_rx[4];
+
 		timer_10k = 0;
 
 		raspi_tx.status = 100;
@@ -1023,14 +1037,19 @@ void epc_test()
 		*/
 
 								raspi_tx.timestamps[0] = timer_10k;
-
-		epc_2dcs();
+		epc_clk_div(1);
 		while(epc_i2c_is_busy());
 
-		epc_clk_div(3);
-		while(epc_i2c_is_busy());
+
 		epc_dis_leds();
 		while(epc_i2c_is_busy());
+
+
+//		epc_4dcs();
+		epc_greyscale();
+		while(epc_i2c_is_busy());
+
+
 		epc_intlen(8, 200);
 		while(epc_i2c_is_busy());
 		;
@@ -1038,16 +1057,17 @@ void epc_test()
 								raspi_tx.timestamps[1] = timer_10k;
 
 
-		dcmi_start_dma(&dcsa, SIZEOF_2DCS);
+		dcmi_start_dma(&dcsa, SIZEOF_MONO);
 		trig();
 		LED_ON();
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
 		LED_OFF();
+		if(raspi_rx[4] == 1) process_bw(raspi_tx.dbg, &dcsa.dcs[0]);
 
 								raspi_tx.timestamps[2] = timer_10k;
 
-
+#if 0
 
 		/*
 			20 MHz
@@ -1061,14 +1081,17 @@ void epc_test()
 		epc_intlen(24, 200);
 		while(epc_i2c_is_busy());
 
-		dcmi_start_dma(&dcsb, SIZEOF_2DCS);
+		dcmi_start_dma(&dcsb, SIZEOF_4DCS);
 		trig();
 		LED_ON();
 
 								raspi_tx.timestamps[3] = timer_10k;
 
 		// Calculate the previous
-		calc_interference_ignore_from_2dcs(ignore, &dcsa, 10);
+		//calc_interference_ignore_from_2dcs(ignore, &dcsa, 100);
+
+//		if(raspi_rx[4] == 1) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+
 
 
 
@@ -1106,6 +1129,9 @@ void epc_test()
 		// Calculate the previous
 		calc_interference_ignore_from_2dcs(ignore, &dcsb, 10);
 
+		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+
+
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
 		LED_OFF();
@@ -1133,6 +1159,7 @@ void epc_test()
 		// do something useful:
 
 		process_bw(raspi_tx.ambient, &mono_long);
+
 
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
@@ -1202,6 +1229,7 @@ void epc_test()
 		// We don't need fancy HDR combining here, since both exposures simply update the ignore list.
 		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 6000, 0, 3);
 
+		if(raspi_rx[4] == 3) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
 								raspi_tx.timestamps[10] = timer_10k;
 
@@ -1247,6 +1275,8 @@ void epc_test()
 		// Calculate the previous
 		calc_toofar_ignore_from_2dcs(ignore, &dcsb, 6000, 0, 2);
 
+		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
 		LED_OFF();
@@ -1277,6 +1307,9 @@ void epc_test()
 
 		// Calculate the previous
 		tof_calc_dist_ampl(&actual_ampl[0], &actual_dist[0], &dcsa, 0, 1);
+
+		if(raspi_rx[4] == 5) memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
+		if(raspi_rx[4] == 6) memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
 
 
 								raspi_tx.timestamps[14] = timer_10k;
@@ -1313,6 +1346,10 @@ void epc_test()
 		// Calculate the previous
 		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, 0, 1);
 
+		if(raspi_rx[4] == 7) memcpy(raspi_tx.dbg, &actual_ampl[1], 1*160*60);
+		if(raspi_rx[4] == 8) memcpy(raspi_tx.dbg, &actual_dist[1], 2*160*60);
+
+
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
 		LED_OFF();
@@ -1325,6 +1362,8 @@ void epc_test()
 
 		// Calculate the last measurement:
 		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, 0, 1);
+		if(raspi_rx[4] == 9)  memcpy(raspi_tx.dbg, &actual_ampl[2], 1*160*60);
+		if(raspi_rx[4] == 10) memcpy(raspi_tx.dbg, &actual_dist[2], 2*160*60);
 
 
 								raspi_tx.timestamps[17] = timer_10k;
@@ -1339,7 +1378,7 @@ void epc_test()
 
 
 								raspi_tx.timestamps[18] = timer_10k;
-
+#endif
 		raspi_tx.status = 255;
 
 		while(timer_10k < 10000)
@@ -1357,7 +1396,6 @@ void epc_test()
 
 }
 
-
 #define NUM_ADC_DATA 1
 
 typedef struct __attribute__((packed))
@@ -1367,9 +1405,6 @@ typedef struct __attribute__((packed))
 } adc_datum_t;
 
 volatile adc_datum_t adc_data[NUM_ADC_DATA];
-
-#define RASPI_RX_LEN 1000
-volatile uint8_t raspi_rx[RASPI_RX_LEN];
 
 volatile int spi_test_cnt;
 
