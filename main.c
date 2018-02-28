@@ -560,14 +560,12 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 
 		if(dcs0 < -2047 || dcs0 > 2046 || dcs1 < -2047 || dcs1 > 2046 || dcs2 < -2047 || dcs2 > 2046 || dcs3 < -2047 || dcs3 > 2046)
 		{
-			//dist = 65535;
-			ampl = 0;
+			ampl = 255;
 		}
 		else if((in->dcs[0].img[i]&1) || (in->dcs[1].img[i]&1) ||
 		   (in->dcs[2].img[i]&1) || (in->dcs[3].img[i]&1))
 		{
-			//dist = 65535;
-			ampl = 0;
+			ampl = 255;
 		}
 		else
 		{
@@ -600,7 +598,7 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 			if(dcs20_mod == 0)
 			{
 				//dist = 65534;
-				ampl = 1;
+				ampl = 0;
 			}
 			else
 			{
@@ -614,12 +612,15 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 
 				dist_i += offset;
 
-				if(dist_i < 0) dist_i += TOF_TBL_PERIOD;
-				else if(dist_i > TOF_TBL_PERIOD) dist_i -= TOF_TBL_PERIOD;
+//				if(dist_i < 0) dist_i += TOF_TBL_PERIOD;
+//				else if(dist_i > TOF_TBL_PERIOD) dist_i -= TOF_TBL_PERIOD;
 				
 				dist_i *= clk_div;
 
-				ampl = 1+sqrt(sq(dcs20)+sq(dcs31))/23;
+
+				if(dist_i < 1) dist_i = 1; else if(dist_i>6000) dist_i=6000;
+
+				ampl = sqrt(sq(dcs20)+sq(dcs31))/23;
 
 			//	if(ampl < sq(75)*2)
 			//		dist = 65534;
@@ -708,6 +709,11 @@ void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int thres
 			{
 				// Use the lookup table to perform atan:
 
+				// for 2dcs:
+				dcs0 *= -1;
+				dcs1 *= -1;
+
+
 				int16_t dcs1_mod, dcs0_mod;
 
 				if(dcs1<0)
@@ -729,7 +735,7 @@ void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int thres
 					dcs1_mod = tmp;
 				}
 
-				if(sqrt(sq(dcs0)+sq(dcs1)) < 100 || dcs0_mod == 0 /* should always be true if the first one is: todo: prove*/)
+				if(sq(dcs0)+sq(dcs1) < sq(100) || dcs0_mod == 0 /* should always be true if the first one is: todo: prove*/)
 				{
 					// amplitude too low
 					ignore_out[yy*EPC_XS+xx] = 1;
@@ -745,8 +751,8 @@ void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int thres
 
 					dist_i += offset;
 
-					if(dist_i < 0) dist_i += TOF_TBL_PERIOD;
-					else if(dist_i > TOF_TBL_PERIOD) dist_i -= TOF_TBL_PERIOD;
+					//if(dist_i < 0) dist_i += TOF_TBL_PERIOD;
+					//else if(dist_i > TOF_TBL_PERIOD) dist_i -= TOF_TBL_PERIOD;
 				
 					dist_i *= clk_div;
 
@@ -833,7 +839,7 @@ static const uint8_t ampl_suitability[256] =
 	109,	108,	107,	106,	105,	104,	103,	102,	101,	100,	
 	99,	98,	97,	96,	95,	94,	93,	92,	91,	90,	
 	89,	88,	87,	86,	85,	84,	83,	82,	81,	80,	
-	79,	78,	77,	76,	75,	74
+	79,	78,	77,	76,	75,	0
 };
 
 
@@ -856,6 +862,10 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 			  )
 			{
 				dist_out[pxidx] = 0;
+			}
+			else if(ampl[0*EPC_XS*EPC_YS+pxidx] == 255) // Shortest exposure overexposed
+			{
+				dist_out[pxidx] = 1;
 			}
 			else
 			{
@@ -890,6 +900,15 @@ void process_bw(uint8_t *out, epc_img_t *in)
 		int lum = ((in->img[i]&0b0011111111111100)>>2)-2048;
 		if(lum < 0) lum = 0; else if(lum > 2047) lum = 2047;
 		out[i] = lum>>3;
+	}
+}
+
+void process_dcs(uint8_t *out, epc_img_t *in)
+{
+	for(int i=0; i<EPC_XS*EPC_YS; i++)
+	{
+		uint16_t lum = ((in->img[i]&0b0011111111111100)>>2);
+		out[i] = lum>>4;
 	}
 }
 
@@ -929,9 +948,11 @@ void init_raspi_tx()
 	raspi_tx.sensor_idx = 0;
 }
 
+static uint8_t ignore[EPC_XS*EPC_YS];
+static epc_4dcs_t dcsa, dcsb __attribute__((aligned(4)));
+static epc_img_t mono_long, mono_short __attribute__((aligned(4)));
 
-
-void epc_test()
+void top_init()
 {
 	delay_ms(300);
 	EPC10V_ON();
@@ -993,11 +1014,6 @@ void epc_test()
 
 	epc_dcmi_init();
 
-
-	static uint8_t ignore[EPC_XS*EPC_YS];
-	static epc_4dcs_t dcsa, dcsb __attribute__((aligned(4)));
-	static epc_img_t mono_long, mono_short __attribute__((aligned(4)));
-
 	// Take a dummy frame, which will eventually output the end-of-frame sync marker, to get the DCMI sync marker parser in the right state
 	{
 		dcmi_start_dma(&mono_short, SIZEOF_MONO);
@@ -1005,19 +1021,169 @@ void epc_test()
 		delay_ms(100);
 	}
 
+
+}
+
+#define OFFSET_CALC_Y_IGNORE (15)
+#define OFFSET_CALC_X_IGNORE (50)
+#define OFFSET_CALC_NUM_PX   ((EPC_YS-2*OFFSET_CALC_Y_IGNORE)*(EPC_XS-2*OFFSET_CALC_X_IGNORE))
+
+void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, int *n_valids, int *dist_sum)
+{
+	int overexps = 0, underexps = 0, valids = 0, dist_accum = 0;
+
+	for(int yy=OFFSET_CALC_Y_IGNORE; yy < 60-OFFSET_CALC_Y_IGNORE; yy++)
+	{
+		for(int xx=OFFSET_CALC_X_IGNORE; xx<160-OFFSET_CALC_X_IGNORE; xx++)
+		{
+			int i = yy*EPC_XS+xx;
+
+			int16_t dcs0 = ((in->dcs[0].img[i]&0b0011111111111100)>>2)-2048;
+			int16_t dcs1 = ((in->dcs[1].img[i]&0b0011111111111100)>>2)-2048;
+			int16_t dcs2 = ((in->dcs[2].img[i]&0b0011111111111100)>>2)-2048;
+			int16_t dcs3 = ((in->dcs[3].img[i]&0b0011111111111100)>>2)-2048;
+
+			if((in->dcs[0].img[i]&1) || (in->dcs[1].img[i]&1) ||
+			   (in->dcs[2].img[i]&1) || (in->dcs[3].img[i]&1) ||
+			   dcs0 < -1800 || dcs0 > 1800 || dcs1 < -1800 || dcs1 > 1800 || dcs2 < -1800 || dcs2 > 1800 || dcs3 < -1800 || dcs3 > 1800)
+			{
+				overexps++;
+			}
+			else
+			{
+				int16_t dcs31 = dcs3-dcs1;
+				int16_t dcs20 = dcs2-dcs0;
+
+				// Use the lookup table to perform atan:
+
+				int16_t dcs31_mod, dcs20_mod;
+
+				if(dcs31<0)
+					dcs31_mod = -dcs31;
+				else
+					dcs31_mod = dcs31;
+
+				if(dcs20<0)
+					dcs20_mod = -dcs20;
+				else
+					dcs20_mod = dcs20;
+
+				int swapped = 0;
+				if(dcs20_mod<dcs31_mod)
+				{
+					swapped = 1;
+					int16_t tmp = dcs20_mod;
+					dcs20_mod = dcs31_mod;
+					dcs31_mod = tmp;
+				}
+
+				if(dcs20_mod == 0 || sq(dcs20)+sq(dcs31) < sq(400))
+				{
+					underexps++;
+				}
+				else
+				{
+
+					int idx = (dcs31_mod*(TOF_TBL_LEN-1))/dcs20_mod;
+
+					int32_t dist_i = tof_tbl[idx];
+					if(swapped) dist_i = TOF_TBL_QUART_PERIOD - dist_i;
+					if(dcs20<0) dist_i = TOF_TBL_HALF_PERIOD - dist_i;
+					if(dcs31<0) dist_i = -dist_i;
+
+//					if(dist_i < 0) dist_i += TOF_TBL_PERIOD;
+//					else if(dist_i > TOF_TBL_PERIOD) dist_i -= TOF_TBL_PERIOD;
+				
+					dist_i *= clk_div;
+
+					valids++;
+					dist_accum += dist_i;
+				}
+
+			}
+		}
+	}
+
+	*dist_sum = dist_accum;
+	*n_valids = valids;
+	*n_unders = underexps;
+	*n_overs = overexps;
+}
+
+
+
+int offsets[4];
+
+int run_offset_cal()
+{
+	epc_ena_leds();
+	while(epc_i2c_is_busy());
+
+	epc_4dcs();
+	while(epc_i2c_is_busy());
+
+	for(int clkdiv=1; clkdiv < 4; clkdiv++)
+	{
+		epc_clk_div(clkdiv);
+		while(epc_i2c_is_busy());
+
+		int int_time = 5;
+		while(1)
+		{
+			epc_intlen(1, int_time);
+			while(epc_i2c_is_busy());
+
+			dcmi_start_dma(&dcsa, SIZEOF_4DCS);
+			trig();
+			LED_ON();
+			while(!epc_capture_finished) ;
+			epc_capture_finished = 0;
+			LED_OFF();
+
+			int n_overs, n_unders, n_valids, dist_sum;
+
+			tof_calc_offset(&dcsa, clkdiv, &n_overs, &n_unders, &n_valids, &dist_sum);
+
+			if(n_overs > 20)
+				return 100+clkdiv;
+
+			if(int_time > 500)
+				return 200+clkdiv;
+
+
+			if(n_valids < (OFFSET_CALC_NUM_PX/8))
+			{
+				int_time = (int_time*3)/2;
+
+			}
+			else if(n_valids < (OFFSET_CALC_NUM_PX*9/10))
+			{
+				int_time = (int_time*6)/5;
+			}
+			else
+			{
+				offsets[clkdiv] = -1*(dist_sum/n_valids) + 50;
+				break;
+			}
+
+			delay_ms(100); // Let the LED dies cool down a bit - we never do super-long bursts on a single camera in the actual usage, either.
+		}
+		delay_ms(200);
+	} 
+
+	return 0;
+}
+
+void epc_test()
+{
 	while(1)
 	{
-/*		while(!new_rx)
-		{
-			LED_ON();
-			delay_us(1);
-			LED_OFF();
-			delay_us(20);
-		}
-		new_rx = 0;
-*/
+		raspi_tx.dbg_id = raspi_rx[4];
 
-//		raspi_tx.dbg_id = raspi_rx[4];
+		raspi_tx.timestamps[20] = offsets[1];
+		raspi_tx.timestamps[21] = offsets[2];
+		raspi_tx.timestamps[22] = offsets[3];
+
 
 		timer_10k = 0;
 
@@ -1056,8 +1222,6 @@ void epc_test()
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
 		LED_OFF();
-//		if(raspi_rx[4] == 1) process_bw(raspi_tx.dbg, &dcsa.dcs[0]);
-
 
 								raspi_tx.timestamps[2] = timer_10k;
 
@@ -1081,9 +1245,9 @@ void epc_test()
 								raspi_tx.timestamps[3] = timer_10k;
 
 		// Calculate the previous
-		calc_interference_ignore_from_2dcs(ignore, &dcsa, 10);
+		calc_interference_ignore_from_2dcs(ignore, &dcsa, 70);
 
-//		if(raspi_rx[4] == 1) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+		if(raspi_rx[4] == 1) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
 
 
@@ -1120,9 +1284,9 @@ void epc_test()
 		LED_ON();
 
 		// Calculate the previous
-		calc_interference_ignore_from_2dcs(ignore, &dcsb, 10);
+		calc_interference_ignore_from_2dcs(ignore, &dcsb, 70);
 
-//		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
 
 		while(!epc_capture_finished) ;
@@ -1220,9 +1384,9 @@ void epc_test()
 
 		// Calculate the previous
 		// We don't need fancy HDR combining here, since both exposures simply update the ignore list.
-		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 6000, 0, 3);
+		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 6000, offsets[3], 3);
 
-//		if(raspi_rx[4] == 3) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+		if(raspi_rx[4] == 3) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
 								raspi_tx.timestamps[10] = timer_10k;
 
@@ -1266,9 +1430,9 @@ void epc_test()
 		LED_ON();
 
 		// Calculate the previous
-		calc_toofar_ignore_from_2dcs(ignore, &dcsb, 6000, 0, 2);
+		calc_toofar_ignore_from_2dcs(ignore, &dcsb, 6000, offsets[2], 2);
 
-//		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
@@ -1299,10 +1463,10 @@ void epc_test()
 
 
 		// Calculate the previous
-		tof_calc_dist_ampl(&actual_ampl[0], &actual_dist[0], &dcsa, 0, 1);
+		tof_calc_dist_ampl(&actual_ampl[0], &actual_dist[0], &dcsa, offsets[1], 1);
 
-//		if(raspi_rx[4] == 5) memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
-//		if(raspi_rx[4] == 6) memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
+		if(raspi_rx[4] == 5) memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
+		if(raspi_rx[4] == 6) memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
 
 
 								raspi_tx.timestamps[14] = timer_10k;
@@ -1337,10 +1501,10 @@ void epc_test()
 		LED_ON();
 
 		// Calculate the previous
-		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, 0, 1);
+		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, offsets[1], 1);
 
-//		if(raspi_rx[4] == 7) memcpy(raspi_tx.dbg, &actual_ampl[1], 1*160*60);
-//		if(raspi_rx[4] == 8) memcpy(raspi_tx.dbg, &actual_dist[1], 2*160*60);
+		if(raspi_rx[4] == 7) memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
+		if(raspi_rx[4] == 8) memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
 
 
 		while(!epc_capture_finished) ;
@@ -1354,9 +1518,9 @@ void epc_test()
 		// All captures done.
 
 		// Calculate the last measurement:
-		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, 0, 1);
-//		if(raspi_rx[4] == 9)  memcpy(raspi_tx.dbg, &actual_ampl[2], 1*160*60);
-//		if(raspi_rx[4] == 10) memcpy(raspi_tx.dbg, &actual_dist[2], 2*160*60);
+		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, offsets[1], 1);
+		if(raspi_rx[4] == 9)  memcpy(raspi_tx.dbg, &actual_ampl[2*EPC_XS*EPC_YS], 1*160*60);
+		if(raspi_rx[4] == 10) memcpy(raspi_tx.dbg, &actual_dist[2*EPC_XS*EPC_YS], 2*160*60);
 
 
 								raspi_tx.timestamps[17] = timer_10k;
@@ -1377,6 +1541,14 @@ void epc_test()
 		{
 			if(new_rx)
 			{
+				if(*((volatile uint32_t*)&raspi_rx[0]) == 0xca0ff5e7) // offset calibration cmd
+				{
+					*((volatile uint32_t*)&raspi_rx[0]) = 0; // zero it out so that we don't do it again
+					__DSB(); __ISB();
+					int ret = run_offset_cal();
+					raspi_tx.timestamps[23] = ret;
+				}
+
 				new_rx = 0;
 				if(new_rx_len > 8)
 					raspi_tx.status = 150;
@@ -1754,6 +1926,22 @@ void main()
 		CS0  = grey
 	*/
 
+	top_init();
 
+/*	delay_ms(1000);
+	int ret = run_offset_calc();
+	if(ret < 0)
+	{
+		LED_ON();
+		delay_ms(100);
+		LED_OFF();
+		delay_ms(100);
+		LED_ON();
+		delay_ms(100);
+		LED_OFF();
+		delay_ms(100);
+	}
+	delay_ms(1000);
+*/
 	epc_test();
 }
