@@ -1144,6 +1144,65 @@ int run_offset_cal()
 	return 0;
 }
 
+/*
+	Estimate the amount of stray light interference in the optical path (internal reflections in the lens mostly)
+
+	Use the shortest actual 4dcs exposure for this.
+
+	While all light contributes to the stray light, only that of very high intensity does matter - the stray light error can be seen
+	when there are reflective objects very close to the camera (less than 0.5m, usually it gets really bad at about 10 cm).
+
+	Objects on the LED side cause more problems.
+
+	Objects just outside the imageable area cause stray light as well. Plastic lens hoods take care of most, but we cannot completely
+	solve the issue using them, there always is a transition area where we can't see using the sensor, but which still hits the lens.
+
+	We only use the shortest HDR shot for this. It's important that:
+
+		* There is not too much overexposure - very close (like 5cm) objects of course get overexposed. But the amount of stray light
+		generated doesn't get saturated, it increases even further, so we'll lost track of the actual amount of exposure.
+		We just assume overexposed pixel to have somewhat (50%?) higher amplitude than the biggest legal value. But if we have a lot
+		of overexposed stuff, we can't know if it's really +20% or +500% overexposed, which will affect the quality of stray light estimate.
+
+
+	The function estimates the amount of "stray light amplitude" - this can be later compared with amplitudes at other pixel sites.
+	The function also calculates a weighed average of the distance this stray light is at. This can be used when correcting other pixels.
+
+	The function gives extra weigh for areas where objects cause higher levels of stray light. For example, the pixel edge on the LED side
+	is given a lot of weight, since it indicates that the object most likely continues over the edge. Still, let's not overdo the corrections.
+
+	Weight table is reduced in resolution by 4*4 (i.e., it's 40*15 instead of 160*60)
+
+	From octave/Matlab:
+	mid=[4, 4, 6, 8,10,13,15,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,15,13,10, 8, 6, 4, 4]
+	c=[floor(mid*6.2);floor(mid*2.5);floor(mid*2.3);floor(mid*2.0);floor(mid*1.7);floor(mid*1.5);floor(mid*1.4);floor(mid*1.3);floor(mid*1.2);floor(mid*1.1);floor(mid*1.05);floor(mid*1.0);floor(mid*0.95);floor(mid*0.9);floor(mid*0.9)]
+
+*/
+
+static const uint8_t stray_weight[15*40] =
+{                                             /* LEDS ON THIS SIDE */
+ 24,24,37,49,62,80,93,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,93,80,62,49,37,24,24,
+ 10,10,15,20,25,32,37,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,37,32,25,20,15,10,10,
+ 9, 9,13,18,23,29,34,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,36,34,29,23,18,13, 9, 9,
+ 8, 8,12,16,20,26,30,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,30,26,20,16,12, 8, 8,
+ 6, 6,10,13,17,22,25,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,25,22,17,13,10, 6, 6,
+ 6, 6, 9,12,15,19,22,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,22,19,15,12, 9, 6, 6,
+ 5, 5, 8,11,14,18,21,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,21,18,14,11, 8, 5, 5,
+ 5, 5, 7,10,13,16,19,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,20,19,16,13,10, 7, 5, 5,
+ 4, 4, 7, 9,12,15,18,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,19,18,15,12, 9, 7, 4, 4,
+ 4, 4, 6, 8,11,14,16,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,16,14,11, 8, 6, 4, 4,
+ 4, 4, 6, 8,10,13,15,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,15,13,10, 8, 6, 4, 4,
+ 4, 4, 6, 8,10,13,15,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,15,13,10, 8, 6, 4, 4,
+ 3, 3, 5, 7, 9,12,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,14,12, 9, 7, 5, 3, 3,
+ 3, 3, 5, 7, 9,11,13,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,13,11, 9, 7, 5, 3, 3,
+ 3, 3, 5, 7, 9,11,13,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,13,11, 9, 7, 5, 3, 3
+}                            /* NON-LED SIDE: items here don't seem to cause any issue */
+
+void calc_stray_estimate(uint8_t *ampl_in[EPC_XS*EPC_YS], int32_t *stray_ampl, int32_t *stray_dist)
+{
+	for(int ys=0; ys<EPC_
+}
+
 void epc_test()
 {
 	while(1)
