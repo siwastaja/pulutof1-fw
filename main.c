@@ -213,13 +213,8 @@ uint8_t epc_i2c_read_len;
 
 void epc_i2c_write_dma(uint8_t slave_addr_7b, volatile uint8_t *buf, uint8_t len)
 {
-	/*
-		Was chasing for a really strange data coherency issue for two days: sometimes, buf[0] is randomly replaced
-		by a former value. Input buf is in non-cached section (core-coupled ram), but it still happens!
-
-		I don't know what the hell is going on, but for some reason I can't understand, invalidation of data cache here
-		seemed to fix the issue.
-	*/
+	// Pipeline flush is almost always needed when using this function, so easier to do it here.
+	// If data cache is enabled later, remember to use non-cacheable sections (or invalidate the cache)
 	__DSB(); __ISB();
 
 	if(epc_i2c_write_busy || epc_i2c_read_busy)
@@ -254,19 +249,6 @@ void epc_i2c_write_dma(uint8_t slave_addr_7b, volatile uint8_t *buf, uint8_t len
 
 	I2C3->CR2 = 1UL<<25 /*AUTOEND: stop is generated after len bytes*/ | ((uint32_t)len)<<16 | 0UL<<10 /*write*/ | slave_addr_7b<<1;
 	I2C3->CR2 |= 1UL<<13; // START. OPT_TODO: try combining with previous CR2 write.
-#if 0
-
-	I2C3->CR1 = I2C_CR1_BASICS_ON |  1UL<<5 /*STOPF interrupt - the only specified way to detect finished transfer when AUTOEND=1 and RELOAD=0*/; // no DMA
-	I2C3->CR2 = 1UL<<25 /*AUTOEND: stop is generated after len bytes*/ | ((uint32_t)len)<<16 | 0UL<<10 /*write*/ | slave_addr_7b<<1;
-	I2C3->CR2 |= 1UL<<13; // START. OPT_TODO: try combining with previous CR2 write.
-	for(int i=0; i<len; i++)
-	{
-		while(!(I2C3->ISR & (1UL<<1)));
-		I2C3->TXDR = buf[i];
-	}
-#endif
-
-
 }
 
 #define epc_i2c_write epc_i2c_write_dma
@@ -372,8 +354,8 @@ void epc_i2c_init()
 	// DMA1 Stream2 = rx
 	// For now, init in Fast mode 400 kHz
 	// Use the datasheet example of 48MHz input clock, with prescaler 1.125 times bigger for 54 MHz. Sync delay calculations are near enough.
-	// Errata: tSU;DAT (do they mean SDADEL register??) must be at least one I2CCLK period
-	// Errata: bus errors are spuriously generated for no reason, the bug is not said to affect the transfer: just ignore BERR.
+	// Silicon bug errata: tSU;DAT (do they mean SDADEL register??) must be at least one I2CCLK period
+	// Silicon bug errata: bus errors are spuriously generated for no reason, the bug is not said to affect the transfer: just ignore BERR.
  
 	DMA1_Stream0->PAR = (uint32_t)&(I2C3->TXDR);
 	DMA1_Stream2->PAR = (uint32_t)&(I2C3->RXDR);
@@ -487,10 +469,7 @@ void epc_dcmi_init()
 			   0b10UL<<13 /*32-bit mem*/ | 0b10UL<<11 /*32-bit periph*/ |
 	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/ | 1UL<<4 /* Transfer complete interrupt*/;
 
-	//DMA2_Stream7->NDTR = sizeof(epc_frame_t)/4;
-
-	//DMA_CLEAR_INTFLAGS(DMA2, 7);
-	//DMA2_Stream7->CR |= 1; // Enable DMA
+	// NDTR is not set yet because it varies. Stream is not enabled yet.
 
 	NVIC_SetPriority(DMA2_Stream7_IRQn, 0b1111);
 	NVIC_EnableIRQ(DMA2_Stream7_IRQn);
@@ -622,10 +601,7 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 
 				ampl = sqrt(sq(dcs20)+sq(dcs31))/23;
 
-			//	if(ampl < sq(75)*2)
-			//		dist = 65534;
-			//	else
-					dist = dist_i;
+				dist = dist_i;
 
 			}
 
@@ -707,12 +683,11 @@ void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int thres
 			}
 			else
 			{
-				// Use the lookup table to perform atan:
-
-				// for 2dcs:
+				// for 2dcs mode to get the quadrant correct:
 				dcs0 *= -1;
 				dcs1 *= -1;
 
+				// Use the lookup table to perform atan:
 
 				int16_t dcs1_mod, dcs0_mod;
 
@@ -786,10 +761,6 @@ void calc_interference_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int
 			{
 				ignore_out[yy*EPC_XS+xx] = 1;
 			}
-//			uint16_t dcs0 = ((in->dcs[0].img[yy*EPC_XS+xx]&0b0011111111111100)>>2);
-//			uint16_t dcs1 = ((in->dcs[1].img[yy*EPC_XS+xx]&0b0011111111111100)>>2);
-
-//			ignore_out[yy*EPC_XS+xx] = dcs1>>4;
 		}
 	}
 }
@@ -839,7 +810,7 @@ static const uint8_t ampl_suitability[256] =
 	109,	108,	107,	106,	105,	104,	103,	102,	101,	100,	
 	99,	98,	97,	96,	95,	94,	93,	92,	91,	90,	
 	89,	88,	87,	86,	85,	84,	83,	82,	81,	80,	
-	79,	78,	77,	76,	75,	0
+	79,	78,	77,	76,	75,	0 /*overexp*/
 };
 
 
@@ -915,7 +886,7 @@ void process_dcs(uint8_t *out, epc_img_t *in)
 typedef struct __attribute__((packed)) __attribute__((aligned(4)))
 {
 	uint32_t header;
-	uint8_t status; // Only read this and deassert chip select for polling the status
+	uint8_t status; // Only read this far and deassert chip select for polling the status.
 	uint8_t dummy1;
 	uint8_t dummy2;
 	uint8_t sensor_idx;
@@ -972,7 +943,6 @@ void top_init()
 		epc_wrbuf[1] = (6 /*TCMI clock div 2..16*/ -1) | 0<<7 /*add clock delay*/;
 		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
-		uart_print_string_blocking("ok\r\n");
 	}
 #endif
 
@@ -1927,21 +1897,5 @@ void main()
 	*/
 
 	top_init();
-
-/*	delay_ms(1000);
-	int ret = run_offset_calc();
-	if(ret < 0)
-	{
-		LED_ON();
-		delay_ms(100);
-		LED_OFF();
-		delay_ms(100);
-		LED_ON();
-		delay_ms(100);
-		LED_OFF();
-		delay_ms(100);
-	}
-	delay_ms(1000);
-*/
 	epc_test();
 }
