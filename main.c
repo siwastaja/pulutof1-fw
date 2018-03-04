@@ -712,7 +712,7 @@ void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int thres
 					dcs1_mod = tmp;
 				}
 
-				if(sq(dcs0)+sq(dcs1) < sq(100) || dcs0_mod == 0 /* should always be true if the first one is: todo: prove*/)
+				if(sq(dcs0)+sq(dcs1) < sq(75) || dcs0_mod == 0 /* should always be true if the first one is: todo: prove*/)
 				{
 					// amplitude too low
 					ignore_out[yy*EPC_XS+xx] = 1;
@@ -852,7 +852,7 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 
 				int32_t suit_sum = suit0 + suit1 + suit2;
 
-				if(suit_sum < 20)
+				if(suit_sum < 10)
 					dist_out[pxidx] = 0;
 				else
 				{
@@ -908,7 +908,7 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 
 				int32_t suit_sum = suit0 + suit1 + suit2;
 
-				if(suit_sum < 20)
+				if(suit_sum < 10)
 					dist_out[pxidx] = 0;
 				else
 				{
@@ -981,8 +981,9 @@ typedef struct __attribute__((packed)) __attribute__((aligned(4)))
 	pos_t robot_pos; // Robot pose during the acquisition
 
 	uint16_t depth[EPC_XS*EPC_YS];
-	uint8_t  ampl[EPC_XS*EPC_YS];
-	uint8_t  ambient[EPC_XS*EPC_YS];
+//	uint8_t  ampl[EPC_XS*EPC_YS];
+//	uint8_t  ambient[EPC_XS*EPC_YS];
+	uint16_t uncorrected_depth[EPC_XS*EPC_YS];
 
 	uint8_t dbg_id;
 	uint8_t dbg[2*EPC_XS*EPC_YS];
@@ -1512,7 +1513,7 @@ void epc_test()
 
 		// do something useful:
 
-		process_bw(raspi_tx.ambient, &mono_long);
+		//process_bw(raspi_tx.ambient, &mono_long);
 
 
 		while(!epc_capture_finished) ;
@@ -1740,7 +1741,7 @@ void epc_test()
 
 		raspi_tx.status = 50;
 
-		if(cnt&1)
+//		if(cnt&1)
 		{
 			uint16_t combined_stray_ampl, combined_stray_dist;
 			if(outstray_ampl > stray_ampl)
@@ -1762,8 +1763,8 @@ void epc_test()
 			raspi_tx.depth[1] = 2000;
 			raspi_tx.depth[2] = 1;
 		}
-		else
-			tof_calc_dist_3hdr_with_ignore(raspi_tx.depth, actual_ampl, actual_dist, ignore);
+//		else
+			tof_calc_dist_3hdr_with_ignore(raspi_tx.uncorrected_depth, actual_ampl, actual_dist, ignore);
 
 
 								raspi_tx.timestamps[19] = timer_10k;
@@ -2107,9 +2108,9 @@ void main()
 
 	init_raspi_tx();
 
-	uint8_t c = 0;
-	for(int i=0; i<160*60; i++)
-		raspi_tx.ambient[i] = c++;
+//	uint8_t c = 0;
+//	for(int i=0; i<160*60; i++)
+//		raspi_tx.ambient[i] = c++;
 
 	__DSB(); __ISB();
 	SPI2->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/ | 1UL<<12 /*Don't Reject The Last Byte*/;
