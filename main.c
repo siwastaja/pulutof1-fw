@@ -917,7 +917,14 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 
 					int32_t corr_amount = ((16*(int32_t)stray_ampl)/(int32_t)combined_ampl);
 
-					if(corr_amount > 1000 || corr_amount < -100 || combined_ampl < stray_ignore)
+					// Expect higher amplitude from "close" pixels. If the amplitude is low, they are artefacts most likely.
+					int32_t expected_ampl;
+					if(combined_dist > 2000)
+						expected_ampl = stray_ignore;
+					else
+						expected_ampl = (2000*stray_ignore)/combined_dist;
+
+					if(corr_amount > 1000 || corr_amount < -100 || combined_ampl < expected_ampl)
 					{
 						dist_out[pxidx] = 0;
 					}
@@ -1762,7 +1769,7 @@ void epc_test()
 								raspi_tx.timestamps[19] = timer_10k;
 		raspi_tx.status = 255;
 
-		while(timer_10k < 10000)
+		while(timer_10k < 7500)
 		{
 			if(new_rx)
 			{
