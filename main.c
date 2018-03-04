@@ -868,8 +868,11 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 #define HDR_EXP_MULTIPLIER 4 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
 
 #define STRAY_CORR_LEVEL 2000 // smaller -> more correction
+#define STRAY_BLANKING_LVL 40 // smaller -> more easily ignored
+
 void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore, uint16_t stray_ampl, uint16_t stray_dist)
 {
+	int stray_ignore = stray_ampl/STRAY_BLANKING_LVL;
 	for(int yy=0; yy < EPC_YS; yy++)
 	{
 		for(int xx=0; xx < EPC_XS; xx++)
@@ -914,7 +917,7 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 
 					int32_t corr_amount = ((16*(int32_t)stray_ampl)/(int32_t)combined_ampl);
 
-					if(corr_amount > 1000 || corr_amount < -100)
+					if(corr_amount > 1000 || corr_amount < -100 || combined_ampl < stray_ignore)
 					{
 						dist_out[pxidx] = 0;
 					}
