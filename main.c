@@ -529,7 +529,7 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 
 	for(int i=0; i < 160*60; i++)
 	{
-		uint16_t dist = 0;
+		uint16_t dist;
 		uint8_t ampl;
 
 		int16_t dcs0 = ((in->dcs[0].img[i]&0b0011111111111100)>>2)-2048;
@@ -540,11 +540,13 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 		if(dcs0 < -2047 || dcs0 > 2046 || dcs1 < -2047 || dcs1 > 2046 || dcs2 < -2047 || dcs2 > 2046 || dcs3 < -2047 || dcs3 > 2046)
 		{
 			ampl = 255;
+			dist = 0;
 		}
 		else if((in->dcs[0].img[i]&1) || (in->dcs[1].img[i]&1) ||
 		   (in->dcs[2].img[i]&1) || (in->dcs[3].img[i]&1))
 		{
 			ampl = 255;
+			dist = 0;
 		}
 		else
 		{
@@ -576,7 +578,7 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 
 			if(dcs20_mod == 0)
 			{
-				//dist = 65534;
+				dist = 65535;
 				ampl = 0;
 			}
 			else
@@ -863,6 +865,85 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 	}
 }
 
+#define HDR_EXP_MULTIPLIER 4 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
+
+#define STRAY_CORR_LEVEL 2000 // smaller -> more correction
+void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore, uint16_t stray_ampl, uint16_t stray_dist)
+{
+	for(int yy=0; yy < EPC_YS; yy++)
+	{
+		for(int xx=0; xx < EPC_XS; xx++)
+		{
+			int pxidx = yy*EPC_XS+xx;
+			if(     // On ignore list: either directly, or on any 8 neighbors.
+				ignore[pxidx] ||
+				( yy>0        &&    ( ignore[(yy-1)*EPC_XS+xx] || (xx>0 && ignore[(yy-1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore[(yy-1)*EPC_XS+xx+1]) ) ) ||
+				( yy<EPC_YS-1 &&    ( ignore[(yy+1)*EPC_XS+xx] || (xx>0 && ignore[(yy+1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore[(yy+1)*EPC_XS+xx+1]) ) ) ||
+				( xx>0        &&    ignore[yy*EPC_XS+xx-1] ) ||
+				( xx<EPC_XS-1 &&    ignore[yy*EPC_XS+xx+1] )
+			  )
+			{
+				dist_out[pxidx] = 0;
+			}
+			else if(ampl[0*EPC_XS*EPC_YS+pxidx] == 255) // Shortest exposure overexposed
+			{
+				dist_out[pxidx] = 1;
+			}
+			else
+			{
+				int32_t suit0 = ampl_suitability[ampl[0*EPC_XS*EPC_YS+pxidx]];
+				int32_t suit1 = ampl_suitability[ampl[1*EPC_XS*EPC_YS+pxidx]];
+				int32_t suit2 = ampl_suitability[ampl[2*EPC_XS*EPC_YS+pxidx]];
+
+				int32_t dist0 = dist[0*EPC_XS*EPC_YS+pxidx];
+				int32_t dist1 = dist[1*EPC_XS*EPC_YS+pxidx];
+				int32_t dist2 = dist[2*EPC_XS*EPC_YS+pxidx];
+
+				int32_t ampl0 = ampl[0*EPC_XS*EPC_YS+pxidx]*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER;
+				int32_t ampl1 = ampl[1*EPC_XS*EPC_YS+pxidx]*HDR_EXP_MULTIPLIER;
+				int32_t ampl2 = ampl[2*EPC_XS*EPC_YS+pxidx];
+
+				int32_t suit_sum = suit0 + suit1 + suit2;
+
+				if(suit_sum < 20)
+					dist_out[pxidx] = 0;
+				else
+				{
+					int32_t combined_ampl = (ampl0*suit0 + ampl1*suit1 + ampl2*suit2)/suit_sum;
+					int32_t combined_dist = (dist0*suit0 + dist1*suit1 + dist2*suit2)/suit_sum;
+
+					int32_t corr_amount = ((16*(int32_t)stray_ampl)/(int32_t)combined_ampl);
+
+					if(corr_amount > 1000 || corr_amount < -100)
+					{
+						dist_out[pxidx] = 0;
+					}
+					else
+					{
+						combined_dist -= stray_dist;
+
+						combined_dist *= STRAY_CORR_LEVEL + corr_amount;
+						combined_dist /= STRAY_CORR_LEVEL;
+
+						combined_dist += stray_dist;
+
+						if(combined_dist < 1) combined_dist = 1;
+						else if(combined_dist > 6000) combined_dist = 6000;
+
+						dist_out[pxidx] = combined_dist;
+					}
+				}				
+
+			}
+
+		}
+	}
+
+	dist_out[0] = 4000;
+	dist_out[1] = 2000;
+	dist_out[2] = 1;
+}
+
 
 void process_bw(uint8_t *out, epc_img_t *in)
 {
@@ -901,6 +982,7 @@ typedef struct __attribute__((packed)) __attribute__((aligned(4)))
 	uint8_t dbg[2*EPC_XS*EPC_YS];
 
 	uint16_t timestamps[24]; // 0.1ms unit timestamps of various steps for analyzing the timing of low-level processing
+	int32_t  dbg_i32[8];
 
 } pulutof_frame_t;
 
@@ -1149,8 +1231,8 @@ int run_offset_cal()
 
 	Use the shortest actual 4dcs exposure for this.
 
-	While all light contributes to the stray light, only that of very high intensity does matter - the stray light error can be seen
-	when there are reflective objects very close to the camera (less than 0.5m, usually it gets really bad at about 10 cm).
+	While all light contributes to stray light, only that of very high intensity does matter - the stray light error can be seen
+	when there are reflective objects very close to the camera (less than 0.5m, usually it gets really bad below 200 mm).
 
 	Objects on the LED side cause more problems.
 
@@ -1163,7 +1245,6 @@ int run_offset_cal()
 		generated doesn't get saturated, it increases even further, so we'll lost track of the actual amount of exposure.
 		We just assume overexposed pixel to have somewhat (50%?) higher amplitude than the biggest legal value. But if we have a lot
 		of overexposed stuff, we can't know if it's really +20% or +500% overexposed, which will affect the quality of stray light estimate.
-
 
 	The function estimates the amount of "stray light amplitude" - this can be later compared with amplitudes at other pixel sites.
 	The function also calculates a weighed average of the distance this stray light is at. This can be used when correcting other pixels.
@@ -1196,22 +1277,42 @@ static const uint8_t stray_weight[15*40] =
  3, 3, 5, 7, 9,12,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,14,12, 9, 7, 5, 3, 3,
  3, 3, 5, 7, 9,11,13,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,13,11, 9, 7, 5, 3, 3,
  3, 3, 5, 7, 9,11,13,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,13,11, 9, 7, 5, 3, 3
-}                            /* NON-LED SIDE: items here don't seem to cause any issue */
+};                            /* NON-LED SIDE: items here don't seem to cause any issue */
 
-void calc_stray_estimate(uint8_t *ampl_in[EPC_XS*EPC_YS], int32_t *stray_ampl, int32_t *stray_dist)
+static void calc_stray_estimate(uint8_t *ampl_in, uint16_t *dist_in, uint16_t *stray_ampl, uint16_t *stray_dist)
 {
-	for(int ys=0; ys<EPC_
+
+	int32_t ampl_acc = 0;
+	int64_t dist_acc = 0;
+	// To save time, we only process 1/16 of the pixels
+	for(int yy=0; yy<15; yy++)
+	{
+		for(int xx=0; xx<40; xx++)
+		{
+			int weigh_i = yy*40+xx;
+			int pix_i = (yy<<2)*160+(xx<<2);
+
+			int32_t ampl_causing_stray = (int32_t)ampl_in[pix_i] * (int32_t)stray_weight[weigh_i]; // Biggest = 255*99 = 25245
+
+			ampl_acc += ampl_causing_stray;
+			dist_acc += dist_in[pix_i] * ampl_causing_stray; // Weigh the distances based on the amplitude. Biggest: 65535 * 25245
+		}
+	}
+
+	*stray_dist = dist_acc / ampl_acc; // Average distance of weighed stray-causing light (short distances dominate)
+	*stray_ampl = ampl_acc / (15*40); // Biggest = 25245
 }
 
 void epc_test()
 {
+	int cnt = 0;
 	while(1)
 	{
 		raspi_tx.dbg_id = raspi_rx[4];
 
-		raspi_tx.timestamps[20] = offsets[1];
-		raspi_tx.timestamps[21] = offsets[2];
-		raspi_tx.timestamps[22] = offsets[3];
+		raspi_tx.timestamps[21] = offsets[1];
+		raspi_tx.timestamps[22] = offsets[2];
+		raspi_tx.timestamps[23] = offsets[3];
 
 
 		timer_10k = 0;
@@ -1554,16 +1655,27 @@ void epc_test()
 
 								raspi_tx.timestamps[17] = timer_10k;
 
+		uint16_t stray_ampl, stray_dist;
+
+		calc_stray_estimate(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &stray_ampl, &stray_dist);
+
+		raspi_tx.dbg_i32[0] = stray_ampl;
+		raspi_tx.dbg_i32[1] = stray_dist;
+								raspi_tx.timestamps[18] = timer_10k;
+
 
 		// Then combine everything:
 		
 
 		raspi_tx.status = 50;
 
-		tof_calc_dist_3hdr_with_ignore(raspi_tx.depth, actual_ampl, actual_dist, ignore);
+		if(cnt&1)
+			tof_calc_dist_3hdr_with_ignore_with_straycomp(raspi_tx.depth, actual_ampl, actual_dist, ignore, stray_ampl, stray_dist);
+		else
+			tof_calc_dist_3hdr_with_ignore(raspi_tx.depth, actual_ampl, actual_dist, ignore);
 
 
-								raspi_tx.timestamps[18] = timer_10k;
+								raspi_tx.timestamps[19] = timer_10k;
 		raspi_tx.status = 255;
 
 		while(timer_10k < 10000)
@@ -1575,7 +1687,7 @@ void epc_test()
 					*((volatile uint32_t*)&raspi_rx[0]) = 0; // zero it out so that we don't do it again
 					__DSB(); __ISB();
 					int ret = run_offset_cal();
-					raspi_tx.timestamps[23] = ret;
+					raspi_tx.dbg_i32[7] = ret;
 				}
 
 				new_rx = 0;
@@ -1584,6 +1696,7 @@ void epc_test()
 			}
 		}
 
+		cnt++;
 	}
 
 

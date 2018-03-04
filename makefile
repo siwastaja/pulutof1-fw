@@ -24,7 +24,7 @@ main.bin: $(OBJ)
 	$(SIZE) main.elf
 
 fr: main.bin
-	scp main_full.bin hrst@192.168.1.3:~/main_full.bin
+	scp main_full.bin hrst@192.168.0.12:~/main_full.bin
 
 flash_full: main.bin
 	stm32sprog -b 115200 -vw main_full.bin
