@@ -941,10 +941,6 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 
 		}
 	}
-
-	dist_out[0] = 4000;
-	dist_out[1] = 2000;
-	dist_out[2] = 1;
 }
 
 
@@ -1284,7 +1280,6 @@ static const uint8_t stray_weight[15*40] =
 
 static void calc_stray_estimate(uint8_t *ampl_in, uint16_t *dist_in, uint16_t *stray_ampl, uint16_t *stray_dist)
 {
-
 	int32_t ampl_acc = 0;
 	int64_t dist_acc = 0;
 	// To save time, we only process 1/16 of the pixels
@@ -1304,6 +1299,68 @@ static void calc_stray_estimate(uint8_t *ampl_in, uint16_t *dist_in, uint16_t *s
 
 	*stray_dist = dist_acc / ampl_acc; // Average distance of weighed stray-causing light (short distances dominate)
 	*stray_ampl = ampl_acc / (15*40); // Biggest = 25245
+}
+
+/*
+	The previous stray light estimator works very well as long as the object causing stray light is within the imaged
+	area. Unfortunately, objects outside the imaged area cause stray light as well, as long as they hit the lens surface.
+	Good lens hoods almost solve the issue, but it's impossible to completely solve in a passive way.
+
+	The hint is: *real* near objects have very high amplitudes. If calculated distance is low, with low amplitude, it's
+	likely a miscalculation from the stray light.
+
+
+*/
+static int32_t calc_outside_stray_estimate(uint8_t* ampl_in, uint16_t* dist_in, uint16_t *stray_ampl)
+{
+	// To save time, we only process 1/4 of the pixels
+
+	int32_t n_acc = 0, acc = 0;
+	for(int yy=0; yy<EPC_YS; yy+=2)
+	{
+		for(int xx=0; xx<EPC_XS; xx+=2)
+		{
+			int pix_i = yy*EPC_XS+xx;
+
+			if(ampl_in[pix_i] > 2) // reliable distance calculation available
+			{
+
+				int64_t dist = dist_in[pix_i]; if(dist < 100) dist = 100;
+				int64_t ampl = ampl_in[pix_i]; if(ampl == 255) ampl = 10000;
+
+				int estimate = (int64_t)10000000/( ampl * sq(dist) );
+
+				/*
+					Examples how the equation works out:
+					ampl=255->10000, dist<=100->100:     0
+					ampl=200         dist = 100:         5
+					ampl=200         dist = 200:         1
+					ampl=50          dist = 100:         20
+					ampl=50          dist = 200:         5
+					ampl=10          dist = 100:         100 (should really ring a bell)
+					ampl=10          dist = 200:         25  (not impossible, but shady)
+					ampl=10          dist = 500:         4   (only slighly weird)
+					ampl=10          dist = 1000:        1   (completely plausible)
+					ampl=3           dist<=100->100:     333 (biggest value)
+				*/
+
+				acc += estimate;
+				n_acc++;
+			}
+		}
+	}
+
+	if(n_acc>200)
+	{
+		int amnt = 10*acc/n_acc;
+		if(amnt > 65535) amnt = 65535;
+		*stray_ampl = amnt;
+	}
+	else
+		*stray_ampl = 0;
+
+	return n_acc;
+
 }
 
 void epc_test()
@@ -1658,12 +1715,16 @@ void epc_test()
 
 								raspi_tx.timestamps[17] = timer_10k;
 
-		uint16_t stray_ampl, stray_dist;
+		uint16_t stray_ampl, stray_dist, outstray_n, outstray_ampl;
 
 		calc_stray_estimate(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &stray_ampl, &stray_dist);
+		outstray_n = calc_outside_stray_estimate(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &outstray_ampl);
 
 		raspi_tx.dbg_i32[0] = stray_ampl;
 		raspi_tx.dbg_i32[1] = stray_dist;
+
+		raspi_tx.dbg_i32[2] = outstray_ampl;
+		raspi_tx.dbg_i32[3] = outstray_n;
 								raspi_tx.timestamps[18] = timer_10k;
 
 
@@ -1673,7 +1734,27 @@ void epc_test()
 		raspi_tx.status = 50;
 
 		if(cnt&1)
-			tof_calc_dist_3hdr_with_ignore_with_straycomp(raspi_tx.depth, actual_ampl, actual_dist, ignore, stray_ampl, stray_dist);
+		{
+			uint16_t combined_stray_ampl, combined_stray_dist;
+			if(outstray_ampl > stray_ampl)
+			{
+				combined_stray_ampl = outstray_ampl;
+				combined_stray_dist = 100;
+			}
+			else
+			{
+				combined_stray_ampl = stray_ampl;
+				combined_stray_dist = stray_dist;
+			}
+			tof_calc_dist_3hdr_with_ignore_with_straycomp(raspi_tx.depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
+
+			if(outstray_ampl > stray_ampl)
+				raspi_tx.depth[0] = 1;
+			else
+				raspi_tx.depth[0] = 3500;
+			raspi_tx.depth[1] = 2000;
+			raspi_tx.depth[2] = 1;
+		}
 		else
 			tof_calc_dist_3hdr_with_ignore(raspi_tx.depth, actual_ampl, actual_dist, ignore);
 
