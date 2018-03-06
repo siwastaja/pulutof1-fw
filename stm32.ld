@@ -12,7 +12,8 @@ MEMORY
   ram_itcm (rwx)        : ORIGIN = 0x00000000, LENGTH = 16K
   stack(rwx)            : ORIGIN = 0x2007BFF8, LENGTH = 0K
 
-  rom (rx)              : ORIGIN = 0x00200000, LENGTH = 1024K  /* through the ICTM bus - it seems that the DMA devices etc. understand and convert (mask) these addresses automatically */
+  rom (rx)              : ORIGIN = 0x00200000, LENGTH = 768K  /* through the ICTM bus - it seems that the DMA devices etc. understand and convert (mask) these addresses automatically */
+  rom_sect7 (rx)        : ORIGIN = 0x002C0000, LENGTH = 256K
 
 /*
   rom_sect0_ictm   (rx) : ORIGIN = 0x00200000, LENGTH = 32K
@@ -40,6 +41,17 @@ SECTIONS
 
     . = ALIGN(8);
 
+    _TEXT_ITCM_I_BEGIN = LOADADDR(.text_itcm);
+
+    .text_itcm :  /* Code run from 16K ITCM RAM block */ 
+    {
+        _TEXT_ITCM_BEGIN = .;
+        *(.text_itcm)
+	_TEXT_ITCM_END = .;
+    } >ram_itcm AT>rom
+
+    . = ALIGN(8);
+
     _DATAI_BEGIN = LOADADDR(.data);
 
     .data : 
@@ -52,29 +64,17 @@ SECTIONS
 
     . = ALIGN(8);
 
-    _DATA_DTCM_I_BEGIN = LOADADDR(.data_dtcm);
+    _DTCM_DATA_I_BEGIN = LOADADDR(.dtcm_data);
 
-    .data_dtcm : 
+    .dtcm_data : 
     {
-        _DATA_DTCM_BEGIN = .;
-        *(.data_dtcm)
-        *(.data_dtcm.*)        
-        _DATA_DTCM_END = .;
+        _DTCM_DATA_BEGIN = .;
+        *(.dtcm_data)
+        *(.dtcm_data.*)        
+        _DTCM_DATA_END = .;
     } >ram_dtcm AT>rom
 
     . = ALIGN(8);
-
-    _TEXT_ITCM_I_BEGIN = LOADADDR(.text_itcm);
-
-    .text_itcm :  /* Code run from 16K ITCM RAM block */ 
-    {
-        _TEXT_ITCM_BEGIN = .;
-        *(.text_itcm)
-	_TEXT_ITCM_END = .;
-    } >ram_itcm AT>rom
-
-    . = ALIGN(8);
-
 
     .bss :
     {
@@ -83,6 +83,16 @@ SECTIONS
         *(COMMON)        
         _BSS_END = .;
     } >ram_main 
+
+    . = ALIGN(8);
+
+    .dtcm_bss :
+    {
+        _DTCM_BSS_BEGIN = .;
+        *(.dtcm_bss)
+        *(.dtcm_bss.*)
+        _DTCM_BSS_END = .;
+    } >ram_dtcm
 
     . = ALIGN(8);
 
@@ -96,7 +106,16 @@ SECTIONS
         _STACKTOP = .;
     } >stack
 
-
     . = ALIGN(8);
+
+    _SETTINGS_I_BEGIN = LOADADDR(.settings);
+
+    .settings :
+    {
+        _SETTINGS_BEGIN = .;
+        *(.settings)
+        *(.settings.*)
+        _SETTINGS_END = .;
+    } >ram_dtcm AT>rom_sect7
 
 }  

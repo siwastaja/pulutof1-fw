@@ -156,9 +156,16 @@ extern unsigned int _DATA_BEGIN;
 extern unsigned int _DATA_END;
 extern unsigned int _DATAI_BEGIN;
 
-extern unsigned int _DATA_DTCM_BEGIN;
-extern unsigned int _DATA_DTCM_END;
-extern unsigned int _DATA_DTCM_I_BEGIN;
+extern unsigned int _DTCM_DATA_BEGIN;
+extern unsigned int _DTCM_DATA_END;
+extern unsigned int _DTCM_DATA_I_BEGIN;
+
+extern unsigned int _SETTINGS_BEGIN;
+extern unsigned int _SETTINGS_END;
+extern unsigned int _SETTINGS_I_BEGIN;
+
+extern unsigned int _DTCM_BSS_BEGIN;
+extern unsigned int _DTCM_BSS_END;
 
 extern unsigned int _TEXT_ITCM_BEGIN;
 extern unsigned int _TEXT_ITCM_END;
@@ -167,25 +174,28 @@ extern unsigned int _TEXT_ITCM_I_BEGIN;
 
 extern void hwtest_main();
 
+void refresh_settings()
+{
+	uint32_t* settings_begin  = (uint32_t*)&_SETTINGS_BEGIN;
+	uint32_t* settings_end    = (uint32_t*)&_SETTINGS_END;
+	uint32_t* settings_i_begin = (uint32_t*)&_SETTINGS_I_BEGIN;
+
+	while(settings_begin < settings_end)
+	{
+		*settings_begin = *settings_i_begin;
+		settings_begin++;
+		settings_i_begin++;
+	}
+}
+
 void stm32init(void)
 {
 //	static volatile int i = 5000;
 //	while(i--)
 //		__asm__ __volatile__ ("nop");
 
-//    __DSB();
-//    __ISB();
-//    SCB->CCR &= ~(uint32_t)SCB_CCR_IC_Msk;  /* disable I-Cache */
-//    SCB->ICIALLU = 0UL;                     /* invalidate I-Cache */
-//    __DSB();
-//    __ISB();
 
-
-//    SCB->CSSELR = 0U; /*(0U << 1U) | 0U;*/  /* Level 1 data cache */
-//    __DSB();
-
-//    SCB->CCR &= ~(uint32_t)SCB_CCR_DC_Msk;  /* disable D-Cache */
-//    __DSB();
+	RCC->AHB1ENR |= 1UL<<20; // Enable DTCM RAM...
 
 	uint32_t* bss_begin = (uint32_t*)&_BSS_BEGIN;
 	uint32_t* bss_end   = (uint32_t*)&_BSS_END;
@@ -194,6 +204,15 @@ void stm32init(void)
 		*bss_begin = 0;
 		bss_begin++;
 	}
+
+	uint32_t* dtcm_bss_begin = (uint32_t*)&_DTCM_BSS_BEGIN;
+	uint32_t* dtcm_bss_end   = (uint32_t*)&_DTCM_BSS_END;
+	while(dtcm_bss_begin < dtcm_bss_end)
+	{
+		*dtcm_bss_begin = 0;
+		dtcm_bss_begin++;
+	}
+
 
 	uint32_t* data_begin  = (uint32_t*)&_DATA_BEGIN;
 	uint32_t* data_end    = (uint32_t*)&_DATA_END;
@@ -206,16 +225,18 @@ void stm32init(void)
 		datai_begin++;
 	}
 
-	uint32_t* data_dtcm_begin  = (uint32_t*)&_DATA_DTCM_BEGIN;
-	uint32_t* data_dtcm_end    = (uint32_t*)&_DATA_DTCM_END;
-	uint32_t* data_dtcm_i_begin = (uint32_t*)&_DATA_DTCM_I_BEGIN;
+	uint32_t* dtcm_data_begin  = (uint32_t*)&_DTCM_DATA_BEGIN;
+	uint32_t* dtcm_data_end    = (uint32_t*)&_DTCM_DATA_END;
+	uint32_t* dtcm_data_i_begin = (uint32_t*)&_DTCM_DATA_I_BEGIN;
 
-	while(data_dtcm_begin < data_dtcm_end)
+	while(dtcm_data_begin < dtcm_data_end)
 	{
-		*data_dtcm_begin = *data_dtcm_i_begin;
-		data_dtcm_begin++;
-		data_dtcm_i_begin++;
+		*dtcm_data_begin = *dtcm_data_i_begin;
+		dtcm_data_begin++;
+		dtcm_data_i_begin++;
 	}
+
+	refresh_settings();
 
 	uint32_t* text_itcm_begin  = (uint32_t*)&_TEXT_ITCM_BEGIN;
 	uint32_t* text_itcm_end    = (uint32_t*)&_TEXT_ITCM_END;
@@ -227,7 +248,6 @@ void stm32init(void)
 		text_itcm_begin++;
 		text_itcm_i_begin++;
 	}
-
 
 	main();
 }

@@ -98,6 +98,33 @@ static int flash_erase_sector(int sector)
 	return 0;
 }
 
+settings_t settings __attribute__((section(".settings")));
+
+void save_flash_settings()
+{
+	unlock_flash();
+	flash_erase_sector(7);
+
+
+	FLASH->CR = 0b10<<8 /*32-bit parallellism*/ | 1UL /*activate programming*/;
+
+	volatile uint32_t* p_flash = (uint32_t*)(FLASH_OFFSET + 0x000C0000 /*sector 7*/);
+	volatile uint32_t* p_ram = (volatile uint32_t* volatile)(&settings);
+
+	for(int i=0; i<sizeof(settings)/4; i++)
+	{
+		*p_flash = *p_ram;
+		p_flash++;
+		p_ram++;
+		__DSB(); __ISB();
+		while(FLASH->SR & (1UL<<16)) ; // Poll busy bit
+	}
+
+	FLASH->SR |= 1UL; // Clear End Of Operation bit by writing '1'
+	FLASH->CR = 0; // Clear programming bit.
+
+	lock_flash();
+}
 
 /*
 

@@ -85,7 +85,6 @@
 volatile int new_rx, new_rx_len;
 
 
-
 typedef struct __attribute__((packed))
 {
 	int32_t ang; // int32_t range --> -180..+180 deg; let it overflow freely. 1 unit = 83.81903171539 ndeg
@@ -782,7 +781,7 @@ void calc_interference_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int
 	they are based on amplitude.
 
 */
-static const uint8_t ampl_suitability[256] =
+static uint8_t ampl_suitability[256] __attribute__((section(".dtcm_data"))) =
 {
 	0,	0,	0,	5,	10,	15,	20,	25,	30,	35,
 	40,	50,	60,	80,	100,	120,	140,	160,	180,	200,
@@ -819,7 +818,7 @@ static const uint8_t ampl_suitability[256] =
 /*
 	ampl and dist are expected to contain 3*EPC_XS*EPC_YS elements.
 */
-void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore)
+void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore_in)
 {
 	for(int yy=0; yy < EPC_YS; yy++)
 	{
@@ -827,11 +826,11 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 		{
 			int pxidx = yy*EPC_XS+xx;
 			if(     // On ignore list: either directly, or on any 8 neighbors.
-				ignore[pxidx] ||
-				( yy>0        &&    ( ignore[(yy-1)*EPC_XS+xx] || (xx>0 && ignore[(yy-1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore[(yy-1)*EPC_XS+xx+1]) ) ) ||
-				( yy<EPC_YS-1 &&    ( ignore[(yy+1)*EPC_XS+xx] || (xx>0 && ignore[(yy+1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore[(yy+1)*EPC_XS+xx+1]) ) ) ||
-				( xx>0        &&    ignore[yy*EPC_XS+xx-1] ) ||
-				( xx<EPC_XS-1 &&    ignore[yy*EPC_XS+xx+1] )
+				ignore_in[pxidx] ||
+				( yy>0        &&    ( ignore_in[(yy-1)*EPC_XS+xx] || (xx>0 && ignore_in[(yy-1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore_in[(yy-1)*EPC_XS+xx+1]) ) ) ||
+				( yy<EPC_YS-1 &&    ( ignore_in[(yy+1)*EPC_XS+xx] || (xx>0 && ignore_in[(yy+1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore_in[(yy+1)*EPC_XS+xx+1]) ) ) ||
+				( xx>0        &&    ignore_in[yy*EPC_XS+xx-1] ) ||
+				( xx<EPC_XS-1 &&    ignore_in[yy*EPC_XS+xx+1] )
 			  )
 			{
 				dist_out[pxidx] = 0;
@@ -870,7 +869,7 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 #define STRAY_CORR_LEVEL 2000 // smaller -> more correction
 #define STRAY_BLANKING_LVL 40 // smaller -> more easily ignored
 
-void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore, uint16_t stray_ampl, uint16_t stray_dist)
+void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore_in, uint16_t stray_ampl, uint16_t stray_dist)
 {
 	int stray_ignore = stray_ampl/STRAY_BLANKING_LVL;
 	for(int yy=0; yy < EPC_YS; yy++)
@@ -879,11 +878,11 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 		{
 			int pxidx = yy*EPC_XS+xx;
 			if(     // On ignore list: either directly, or on any 8 neighbors.
-				ignore[pxidx] ||
-				( yy>0        &&    ( ignore[(yy-1)*EPC_XS+xx] || (xx>0 && ignore[(yy-1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore[(yy-1)*EPC_XS+xx+1]) ) ) ||
-				( yy<EPC_YS-1 &&    ( ignore[(yy+1)*EPC_XS+xx] || (xx>0 && ignore[(yy+1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore[(yy+1)*EPC_XS+xx+1]) ) ) ||
-				( xx>0        &&    ignore[yy*EPC_XS+xx-1] ) ||
-				( xx<EPC_XS-1 &&    ignore[yy*EPC_XS+xx+1] )
+				ignore_in[pxidx] ||
+				( yy>0        &&    ( ignore_in[(yy-1)*EPC_XS+xx] || (xx>0 && ignore_in[(yy-1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore_in[(yy-1)*EPC_XS+xx+1]) ) ) ||
+				( yy<EPC_YS-1 &&    ( ignore_in[(yy+1)*EPC_XS+xx] || (xx>0 && ignore_in[(yy+1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore_in[(yy+1)*EPC_XS+xx+1]) ) ) ||
+				( xx>0        &&    ignore_in[yy*EPC_XS+xx-1] ) ||
+				( xx<EPC_XS-1 &&    ignore_in[yy*EPC_XS+xx+1] )
 			  )
 			{
 				dist_out[pxidx] = 0;
@@ -1008,7 +1007,7 @@ void init_raspi_tx()
 	raspi_tx.sensor_idx = 0;
 }
 
-static uint8_t ignore[EPC_XS*EPC_YS];
+static uint8_t ignore[EPC_XS*EPC_YS] __attribute__((section(".dtcm_bss")));
 static epc_4dcs_t dcsa, dcsb __attribute__((aligned(4)));
 static epc_img_t mono_long, mono_short __attribute__((aligned(4)));
 
@@ -1171,8 +1170,6 @@ void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, i
 
 
 
-int offsets[4];
-
 int run_offset_cal()
 {
 	epc_ena_leds();
@@ -1221,7 +1218,7 @@ int run_offset_cal()
 			}
 			else
 			{
-				offsets[clkdiv] = -1*(dist_sum/n_valids) + 50;
+				settings.offsets[clkdiv] = -1*(dist_sum/n_valids) + 50;
 				break;
 			}
 
@@ -1230,6 +1227,8 @@ int run_offset_cal()
 		delay_ms(200);
 	} 
 
+	save_flash_settings();
+	refresh_settings();
 	return 0;
 }
 
@@ -1267,7 +1266,7 @@ int run_offset_cal()
 
 */
 
-static const uint8_t stray_weight[15*40] =
+static uint8_t stray_weight[15*40] __attribute__((section(".dtcm_data"))) =
 {                                             /* LEDS ON THIS SIDE */
  24,24,37,49,62,80,93,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,93,80,62,49,37,24,24,
  10,10,15,20,25,32,37,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,37,32,25,20,15,10,10,
@@ -1378,9 +1377,9 @@ void epc_test()
 	{
 		raspi_tx.dbg_id = raspi_rx[4];
 
-		raspi_tx.timestamps[21] = offsets[1];
-		raspi_tx.timestamps[22] = offsets[2];
-		raspi_tx.timestamps[23] = offsets[3];
+		raspi_tx.timestamps[21] = settings.offsets[1];
+		raspi_tx.timestamps[22] = settings.offsets[2];
+		raspi_tx.timestamps[23] = settings.offsets[3];
 
 
 		timer_10k = 0;
@@ -1443,7 +1442,7 @@ void epc_test()
 								raspi_tx.timestamps[3] = timer_10k;
 
 		// Calculate the previous
-		calc_interference_ignore_from_2dcs(ignore, &dcsa, 70);
+	//	calc_interference_ignore_from_2dcs(ignore, &dcsa, 500);
 
 		if(raspi_rx[4] == 1) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
@@ -1482,7 +1481,7 @@ void epc_test()
 		LED_ON();
 
 		// Calculate the previous
-		calc_interference_ignore_from_2dcs(ignore, &dcsb, 70);
+	//	calc_interference_ignore_from_2dcs(ignore, &dcsb, 500);
 
 		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
@@ -1582,7 +1581,7 @@ void epc_test()
 
 		// Calculate the previous
 		// We don't need fancy HDR combining here, since both exposures simply update the ignore list.
-		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 6000, offsets[3], 3);
+		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 6000, settings.offsets[3], 3);
 
 		if(raspi_rx[4] == 3) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
@@ -1628,7 +1627,7 @@ void epc_test()
 		LED_ON();
 
 		// Calculate the previous
-		calc_toofar_ignore_from_2dcs(ignore, &dcsb, 6000, offsets[2], 2);
+		calc_toofar_ignore_from_2dcs(ignore, &dcsb, 6000, settings.offsets[2], 2);
 
 		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
@@ -1661,7 +1660,7 @@ void epc_test()
 
 
 		// Calculate the previous
-		tof_calc_dist_ampl(&actual_ampl[0], &actual_dist[0], &dcsa, offsets[1], 1);
+		tof_calc_dist_ampl(&actual_ampl[0], &actual_dist[0], &dcsa, settings.offsets[1], 1);
 
 		if(raspi_rx[4] == 5) memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
 		if(raspi_rx[4] == 6) memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
@@ -1699,7 +1698,7 @@ void epc_test()
 		LED_ON();
 
 		// Calculate the previous
-		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, offsets[1], 1);
+		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[1], 1);
 
 		if(raspi_rx[4] == 7) memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 8) memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
@@ -1716,7 +1715,7 @@ void epc_test()
 		// All captures done.
 
 		// Calculate the last measurement:
-		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, offsets[1], 1);
+		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, settings.offsets[1], 1);
 		if(raspi_rx[4] == 9)  memcpy(raspi_tx.dbg, &actual_ampl[2*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 10) memcpy(raspi_tx.dbg, &actual_dist[2*EPC_XS*EPC_YS], 2*160*60);
 
@@ -1929,7 +1928,7 @@ void main()
 	Q (for USB) = 9 -> 48 MHZ
 	*/
 
-	RCC->AHB1ENR = 0xff /*GPIOA to H*/ | 1UL<<21 /*DMA1*/ | 1UL<<22 /*DMA2*/;
+	RCC->AHB1ENR = 0xff /*GPIOA to H*/ | 1UL<<21 /*DMA1*/ | 1UL<<22 /*DMA2*/ | 1UL<<20 /*DTCM RAM*/;
 	IO_TO_GPO(GPIOF, 2);
 
 	LED_ON();
