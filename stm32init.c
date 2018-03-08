@@ -10,10 +10,12 @@ void hardfault_handler();
 extern void error(int code);
 extern void main();
 
-extern void epc_i2c_inthandler();
+extern void epc01_i2c_inthandler();
+extern void epc23_i2c_inthandler();
 extern void epc_dcmi_dma_inthandler();
 extern void epc_shutdown_inthandler();
-extern void epc_rx_dma_inthandler();
+extern void epc01_rx_dma_inthandler();
+extern void epc23_rx_dma_inthandler();
 extern void raspi_spi_xfer_end_inthandler();
 extern void timebase_handler();
 extern unsigned int _STACKTOP;
@@ -49,8 +51,8 @@ unsigned int * the_nvic_vector[126] __attribute__ ((section(".nvic_vector"))) =
 /* 0x0064                    */ (unsigned int *) invalid_handler,
 /* 0x0068                    */ (unsigned int *) invalid_handler,
 /* 0x006C DMA1_Stream0       */ (unsigned int *) invalid_handler,
-/* 0x0070 DMA1_Stream1       */ (unsigned int *) invalid_handler,
-/* 0x0074 DMA1_Stream2       */ (unsigned int *) epc_rx_dma_inthandler,
+/* 0x0070 DMA1_Stream1       */ (unsigned int *) epc23_rx_dma_inthandler,
+/* 0x0074 DMA1_Stream2       */ (unsigned int *) epc01_rx_dma_inthandler,
 /* 0x0078 DMA1_Stream3       */ (unsigned int *) invalid_handler,
 /* 0x007C DMA1_Stream4       */ (unsigned int *) invalid_handler,
 /* 0x0080 DMA1_Stream5       */ (unsigned int *) invalid_handler,
@@ -109,7 +111,7 @@ unsigned int * the_nvic_vector[126] __attribute__ ((section(".nvic_vector"))) =
 /* 0x0154 DMA2_Stream6       */ (unsigned int *) invalid_handler,
 /* 0x0158 DMA2_Stream7       */ (unsigned int *) epc_dcmi_dma_inthandler,
 /* 0x015C                    */ (unsigned int *) invalid_handler,
-/* 0x0160 I2C3 event         */ (unsigned int *) epc_i2c_inthandler,
+/* 0x0160 I2C3 event         */ (unsigned int *) epc01_i2c_inthandler,
 /* 0x0164 I2C3 error         */ (unsigned int *) invalid_handler,
 /* 0x0168                    */ (unsigned int *) invalid_handler,
 /* 0x016C                    */ (unsigned int *) invalid_handler,
@@ -132,8 +134,8 @@ unsigned int * the_nvic_vector[126] __attribute__ ((section(".nvic_vector"))) =
 /* 0x01B0                    */ (unsigned int *) invalid_handler,
 /* 0x01B4                    */ (unsigned int *) invalid_handler,
 /* 0x01B8                    */ (unsigned int *) invalid_handler,
-/* 0x01BC                    */ (unsigned int *) invalid_handler,
-/* 0x01C0                    */ (unsigned int *) invalid_handler,
+/* 0x01BC I2C4 event         */ (unsigned int *) epc23_i2c_inthandler,
+/* 0x01C0 I2C4 error         */ (unsigned int *) invalid_handler,
 /* 0x01C4                    */ (unsigned int *) invalid_handler,
 /* 0x01C8                    */ (unsigned int *) invalid_handler,
 /* 0x01CC                    */ (unsigned int *) invalid_handler,

@@ -432,9 +432,23 @@ void flasher()
 
 			case 0xdead5678: // RESET
 			{
-				LED_OFF();
-				NVIC_SystemReset();
-				while(1);
+				uint8_t type = *((volatile uint8_t*)(FLASHER_BUF_ADDR+4));
+				if(type==55)
+				{
+					while(1)
+					{
+						LED_ON();
+						delay_ms(1000);
+						LED_OFF();
+						delay_ms(1000);
+					}
+				}
+				else
+				{
+					LED_OFF();
+					NVIC_SystemReset();
+					while(1);
+				}
 			}
 			break;
 

@@ -54,6 +54,37 @@
 #define EPC23_RD_DMA       DMA1_Stream1
 #define EPC23_RD_DMA_CHAN  8
 
+#define N_SENSORS 4
+#define N_I2C 2
+
+static DMA_Stream_TypeDef * const EPC_I2C_WR_DMAS[N_I2C] = 
+	{DMA1_Stream0, DMA1_Stream5};
+
+static const int EPC_I2C_WR_DMAS_INT[N_I2C] = 
+	{0, 5};
+
+static DMA_Stream_TypeDef * const EPC_I2C_RD_DMAS[N_I2C] = 
+	{DMA1_Stream2, DMA1_Stream1};
+
+static const int EPC_I2C_RD_DMAS_INT[N_I2C] = 
+	{2, 1};
+
+static const int EPC_I2C_WR_CHANS[N_I2C] =
+	{8, 2};
+
+static const int EPC_I2C_RD_CHANS[N_I2C] =
+	{3, 8};
+
+static I2C_TypeDef * const EPC_I2CS[N_I2C] =
+	{I2C3, I2C4};
+
+static const uint8_t buses[N_SENSORS] =
+{ 0, 0, 1, 1};
+
+static const uint8_t addrs[N_SENSORS] =
+{ 0b0100000, 0b0100001, 0b0100000, 0b0100001};
+
+
 #define DMA_STREAM(_dma_, _stream_) (_dma_ ## _Stream ## _stream_)
 
 #define RASPI_SPI       SPI2
@@ -75,7 +106,7 @@
 
 
 
-#define EPC02_ADDR 0b0100001
+#define EPC02_ADDR 0b0100000
 #define EPC13_ADDR 0b0100001
 
 
@@ -111,8 +142,11 @@ void delay_ms(uint32_t i)
 	}
 }
 
-void uart_print_string_blocking(const char *buf)
+static void uart_print_string_blocking(const char *buf)
 {
+	#ifndef USE_UART
+		return;
+	#endif
 	while(buf[0] != 0)
 	{
 		while((USART3->ISR & (1UL<<7)) == 0) ;
@@ -155,17 +189,6 @@ void error(int code)
 }
 
 
-void uart_send_blocking(const uint8_t *buf, int len)
-{
-	while(len--)
-	{
-		while((USART3->ISR & (1UL<<7)) == 0) ;
-		USART3->TDR = buf[0];
-		buf++;
-	}
-}
-
-
 #define CRC_INITIAL_REMAINDER 0x00
 #define CRC_POLYNOMIAL 0x07 // As per CRC-8-CCITT
 
@@ -182,100 +205,79 @@ void uart_send_blocking(const uint8_t *buf, int len)
 		} \
 	}
 
-void uart_send_blocking_crc(const uint8_t *buf, uint8_t id, int len)
-{
-	uint8_t chk = CRC_INITIAL_REMAINDER;
-
-	while((USART3->ISR & (1UL<<7)) == 0) ;
-	USART3->TDR = id;
-	while((USART3->ISR & (1UL<<7)) == 0) ;
-	USART3->TDR = len & 0xff;
-	while((USART3->ISR & (1UL<<7)) == 0) ;
-	USART3->TDR = (len & 0xff00)>>8;
-
-	while(len--)
-	{
-		chk ^= buf[0];
-		CALC_CRC(chk);
-		while((USART3->ISR & (1UL<<7)) == 0) ;
-		USART3->TDR = buf[0];
-		buf++;
-	}
-	while((USART3->ISR & (1UL<<7)) == 0) ;
-	USART3->TDR = chk;
-}
-
 
 // Things written to I2C CR1 every time:
 #define I2C_CR1_BASICS (0UL<<8 /*Digital filter len 0 to 15*/)
 #define I2C_CR1_BASICS_ON (I2C_CR1_BASICS | 1UL /*keep it on*/)
 
-volatile int epc_i2c_write_busy, epc_i2c_read_busy;
+volatile int epc_i2c_write_busy[N_I2C], epc_i2c_read_busy[N_I2C];
+volatile int epc_i2c_read_state[N_I2C];
+uint8_t epc_i2c_read_slave_addr[N_I2C];
+volatile uint8_t *epc_i2c_read_buf[N_I2C];
+uint8_t epc_i2c_read_len[N_I2C];
 
-volatile int epc_i2c_read_state;
-uint8_t epc_i2c_read_slave_addr;
-volatile uint8_t *epc_i2c_read_buf;
-uint8_t epc_i2c_read_len;
-
-void epc_i2c_write_dma(uint8_t slave_addr_7b, volatile uint8_t *buf, uint8_t len)
+void epc_i2c_write_dma(uint8_t bus, uint8_t slave_addr_7b, volatile uint8_t *buf, uint8_t len)
 {
+	if(bus >= N_I2C) return;
 	// Pipeline flush is almost always needed when using this function, so easier to do it here.
 	// If data cache is enabled later, remember to use non-cacheable sections (or invalidate the cache)
 	__DSB(); __ISB();
 
-	if(epc_i2c_write_busy || epc_i2c_read_busy)
+	if(epc_i2c_write_busy[bus] || epc_i2c_read_busy[bus])
 		error(11);
 
-	if(DMA1_Stream0->CR & 1UL)
+	if(EPC_I2C_WR_DMAS[bus]->CR & 1UL)
 		error(12);
 
-	epc_i2c_write_busy = 1;
-	I2C3->ICR = 1UL<<5; // Clear any pending STOPF interrupt 
+	epc_i2c_write_busy[bus] = 1;
+	EPC_I2CS[bus]->ICR = 1UL<<5; // Clear any pending STOPF interrupt 
 
 	if(len > 1) // Actually use DMA
 	{		
-		DMA1_Stream0->CR = 8UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 
+		EPC_I2C_WR_DMAS[bus]->CR = EPC_I2C_WR_CHANS[bus]<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 
 				   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
 			           1UL<<10 /*mem increment*/ | 0b01UL<<6 /*mem-to-periph*/;
 
-		DMA1_Stream0->NDTR = len;
-		DMA1_Stream0->M0AR = (uint32_t)buf;
+		EPC_I2C_WR_DMAS[bus]->NDTR = len;
+		EPC_I2C_WR_DMAS[bus]->M0AR = (uint32_t)buf;
 
-		DMA_CLEAR_INTFLAGS(DMA1, 0);
-		DMA1_Stream0->CR |= 1; // Enable DMA // OPT_TODO: try combining with previous CR write.
+		DMA_CLEAR_INTFLAGS(DMA1, EPC_I2C_WR_DMAS_INT[bus]);
+		EPC_I2C_WR_DMAS[bus]->CR |= 1; // Enable DMA // OPT_TODO: try combining with previous CR write.
 
-		I2C3->CR1 = I2C_CR1_BASICS_ON |  1UL<<5 /*STOPF interrupt - the only specified way to detect finished transfer when AUTOEND=1 and RELOAD=0*/ | 1UL<<14 /*TX DMA*/;
+		EPC_I2CS[bus]->CR1 = I2C_CR1_BASICS_ON |  1UL<<5 /*STOPF interrupt - the only specified way to detect finished transfer when AUTOEND=1 and RELOAD=0*/ | 1UL<<14 /*TX DMA*/;
 
 	}
 	else	// Just do the single write right now.
 	{
-		I2C3->CR1 = I2C_CR1_BASICS_ON |  1UL<<5 /*STOPF interrupt - the only specified way to detect finished transfer when AUTOEND=1 and RELOAD=0*/; // no DMA
-		I2C3->TXDR = buf[0];
+		EPC_I2CS[bus]->CR1 = I2C_CR1_BASICS_ON |  1UL<<5 /*STOPF interrupt - the only specified way to detect finished transfer when AUTOEND=1 and RELOAD=0*/; // no DMA
+		EPC_I2CS[bus]->TXDR = buf[0];
 	}
 
-	I2C3->CR2 = 1UL<<25 /*AUTOEND: stop is generated after len bytes*/ | ((uint32_t)len)<<16 | 0UL<<10 /*write*/ | slave_addr_7b<<1;
-	I2C3->CR2 |= 1UL<<13; // START. OPT_TODO: try combining with previous CR2 write.
+	EPC_I2CS[bus]->CR2 = 1UL<<25 /*AUTOEND: stop is generated after len bytes*/ | ((uint32_t)len)<<16 | 0UL<<10 /*write*/ | slave_addr_7b<<1;
+	EPC_I2CS[bus]->CR2 |= 1UL<<13; // START. OPT_TODO: try combining with previous CR2 write.
 }
+
 
 #define epc_i2c_write epc_i2c_write_dma
 
-void epc_i2c_read_dma(uint8_t slave_addr_7b, volatile uint8_t *buf, uint8_t len)
+void epc_i2c_read_dma(uint8_t bus, uint8_t slave_addr_7b, volatile uint8_t *buf, uint8_t len)
 {
-	DMA1_Stream2->CR = 3UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 
+	if(bus >= N_I2C) return;
+	EPC_I2C_RD_DMAS[bus]->CR = EPC_I2C_RD_CHANS[bus]<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 
 			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
 	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/ | 1UL<<4 /*transfer complete interrupt*/;
 
-	DMA1_Stream2->NDTR = len;
-	DMA1_Stream2->M0AR = (uint32_t)buf;
+	EPC_I2C_RD_DMAS[bus]->NDTR = len;
+	EPC_I2C_RD_DMAS[bus]->M0AR = (uint32_t)buf;
 
-	I2C3->CR1 = I2C_CR1_BASICS_ON | 0UL<<5 /*OFF FOR READ: STOPF interrupt - the only specified way to detect finished transfer when AUTOEND=1 and RELOAD=0*/ | 1UL<<15 /*RX DMA*/ ;
+	EPC_I2CS[bus]->CR1 = I2C_CR1_BASICS_ON | 0UL<<5 /*OFF FOR READ: STOPF interrupt - the only specified way to detect finished transfer when AUTOEND=1 and RELOAD=0*/ | 1UL<<15 /*RX DMA*/ ;
 
-	I2C3->CR2 = 1UL<<25 /*AUTOEND: stop is generated after len bytes*/ | ((uint32_t)len)<<16 | 1UL<<10 /*read*/ | slave_addr_7b<<1;
+	EPC_I2CS[bus]->CR2 = 1UL<<25 /*AUTOEND: stop is generated after len bytes*/ | ((uint32_t)len)<<16 | 1UL<<10 /*read*/ | slave_addr_7b<<1;
 
-	DMA_CLEAR_INTFLAGS(DMA1, 2);
-	DMA1_Stream2->CR |= 1; // Enable DMA // OPT_TODO: try combining with previous CR write.
+	DMA_CLEAR_INTFLAGS(DMA1, EPC_I2C_RD_DMAS_INT[bus]);
+	EPC_I2C_RD_DMAS[bus]->CR |= 1; // Enable DMA // OPT_TODO: try combining with previous CR write.
 
-	I2C3->CR2 |= 1UL<<13; // START. OPT_TODO: try combining with previous CR2 write.
+	EPC_I2CS[bus]->CR2 |= 1UL<<13; // START. OPT_TODO: try combining with previous CR2 write.
 }
 
 /*
@@ -285,11 +287,13 @@ void epc_i2c_read_dma(uint8_t slave_addr_7b, volatile uint8_t *buf, uint8_t len)
 	of data and hangup in execution time, we can as well solve all error checking using a simple watchdog that does the same,
 	with much less code footprint (good for reliability, execution speed, flash usage, and code maintainability) compared to trying
 	to catch all unexpected things in actual interrupt services or API functions.
+	TODO: actually implement said watchdog
 */
 
-void epc_i2c_read(uint8_t slave_addr_7b, uint8_t reg_addr, volatile uint8_t *buf, uint8_t len)
+void epc_i2c_read(uint8_t bus, uint8_t slave_addr_7b, uint8_t reg_addr, volatile uint8_t *buf, uint8_t len)
 {
-	if(epc_i2c_write_busy || epc_i2c_read_busy)
+	if(bus >= N_I2C) return;
+	if(epc_i2c_write_busy[bus] || epc_i2c_read_busy[bus])
 		error(12);
 	/*
 		Full I2C read cycle consists of a write cycle (payload = reg_addr), without stop condition,
@@ -300,44 +304,51 @@ void epc_i2c_read(uint8_t slave_addr_7b, uint8_t reg_addr, volatile uint8_t *buf
 		After the write is complete, there is no AUTOEND generated, instead we get an interrupt, allowing
 		us to go on with the read.
 	*/
-	epc_i2c_read_busy = 1;
+	epc_i2c_read_busy[bus] = 1;
 
-	I2C3->CR1 = I2C_CR1_BASICS_ON | 1UL<<6 /*Transfer Complete interrupt - happens because AUTOEND=0 and RELOAD=0*/; // no DMA
-	I2C3->CR2 = 0UL<<25 /*AUTOEND off*/ | 1UL<<16 /*len=1*/ | 0UL<<10 /*write*/ | slave_addr_7b<<1;
-	I2C3->TXDR = reg_addr;
-	I2C3->CR2 |= 1UL<<13; // START. OPT_TODO: try combining with previous CR2 write.
-	epc_i2c_read_state = 1;
-	epc_i2c_read_slave_addr = slave_addr_7b;
-	epc_i2c_read_buf = buf;
-	epc_i2c_read_len = len;
+	EPC_I2CS[bus]->CR1 = I2C_CR1_BASICS_ON | 1UL<<6 /*Transfer Complete interrupt - happens because AUTOEND=0 and RELOAD=0*/; // no DMA
+	EPC_I2CS[bus]->CR2 = 0UL<<25 /*AUTOEND off*/ | 1UL<<16 /*len=1*/ | 0UL<<10 /*write*/ | slave_addr_7b<<1;
+	EPC_I2CS[bus]->TXDR = reg_addr;
+	EPC_I2CS[bus]->CR2 |= 1UL<<13; // START. OPT_TODO: try combining with previous CR2 write.
+	epc_i2c_read_state[bus] = 1;
+	epc_i2c_read_slave_addr[bus] = slave_addr_7b;
+	epc_i2c_read_buf[bus] = buf;
+	epc_i2c_read_len[bus] = len;
 
 }
 
 // Returns true whenever read or write operation is going on.
-int epc_i2c_is_busy()
+int epc_i2c_is_busy(uint8_t bus)
 {
-	return epc_i2c_write_busy || epc_i2c_read_busy;
+	if(bus >= N_I2C) return 1;
+	return epc_i2c_write_busy[bus] || epc_i2c_read_busy[bus];
 }
 
 
-void epc_rx_dma_inthandler() // read complete.
+void epc01_rx_dma_inthandler() // read complete.
 {
 	DMA_CLEAR_INTFLAGS(DMA1, 2);
-	epc_i2c_read_busy = 0;
+	epc_i2c_read_busy[0] = 0;
+}
+
+void epc23_rx_dma_inthandler() // read complete.
+{
+	DMA_CLEAR_INTFLAGS(DMA1, 1);
+	epc_i2c_read_busy[1] = 0;
 }
 
 /*
 	For some reason, I can't get repeated start (Sr) condition out of the new STM32 I2C - it generates a stop-start sequence even when only asked for a START.
 	Luckily, the EPC chip still works correctly even though this violates the spec.
 */
-void epc_i2c_inthandler()
+void epc01_i2c_inthandler()
 {
 	I2C3->ICR = 1UL<<5; // Clear the STOPF flag.
-	if(epc_i2c_read_state)
+	if(epc_i2c_read_state[0])
 	{
 		// Writing START to 1 (in epc_i2c_read_dma()) clears the interrupt flag
-		epc_i2c_read_dma(epc_i2c_read_slave_addr, epc_i2c_read_buf, epc_i2c_read_len);
-		epc_i2c_read_state=0;
+		epc_i2c_read_dma(0, epc_i2c_read_slave_addr[0], epc_i2c_read_buf[0], epc_i2c_read_len[0]);
+		epc_i2c_read_state[0]=0;
 
 	}
 	else // STOPF interrupt - this was a write.
@@ -348,13 +359,35 @@ void epc_i2c_inthandler()
 		}
 
 		// Write is now finished.
-		epc_i2c_write_busy = 0;
+		epc_i2c_write_busy[0] = 0;
 		I2C3->CR1 = I2C_CR1_BASICS_ON;
 	}
 }
 
+void epc23_i2c_inthandler()
+{
+	I2C4->ICR = 1UL<<5; // Clear the STOPF flag.
+	if(epc_i2c_read_state[1])
+	{
+		// Writing START to 1 (in epc_i2c_read_dma()) clears the interrupt flag
+		epc_i2c_read_dma(1, epc_i2c_read_slave_addr[1], epc_i2c_read_buf[1], epc_i2c_read_len[1]);
+		epc_i2c_read_state[1]=0;
 
-void epc_i2c_init()
+	}
+	else // STOPF interrupt - this was a write.
+	{
+		if(I2C4->ISR & (1UL<<15)) // busy shouldn't be high - at least fail instead of doing random shit
+		{
+			error(22);
+		}
+
+		// Write is now finished.
+		epc_i2c_write_busy[1] = 0;
+		I2C4->CR1 = I2C_CR1_BASICS_ON;
+	}
+}
+
+void epc01_i2c_init()
 {
 	// DMA1 Stream0 = tx
 	// DMA1 Stream2 = rx
@@ -385,6 +418,33 @@ void epc_i2c_init()
 	NVIC_EnableIRQ(I2C3_EV_IRQn);
 	NVIC_SetPriority(DMA1_Stream2_IRQn, 0b0101);
 	NVIC_EnableIRQ(DMA1_Stream2_IRQn);
+
+}
+
+void epc23_i2c_init()
+{
+	DMA1_Stream5->PAR = (uint32_t)&(I2C4->TXDR);
+	DMA1_Stream1->PAR = (uint32_t)&(I2C4->RXDR);
+
+	// open drain:
+	GPIOB->OTYPER |= 1UL<<6;
+	GPIOB->OTYPER |= 1UL<<7;
+
+	IO_TO_ALTFUNC(GPIOB, 6);
+	IO_TO_ALTFUNC(GPIOB, 7);
+	IO_SET_ALTFUNC(GPIOB, 6, 11);
+	IO_SET_ALTFUNC(GPIOB, 7, 11);
+
+//	I2C4->TIMINGR = 6UL<<28/*PRESCALER*/  | 9UL<<0/*SCLL*/  | 3UL<<8/*SCLH*/  | 3UL<<16 /*SDADEL*/  | 3UL<<20 /*SCLDEL*/;
+	I2C4->TIMINGR = 14UL<<28/*PRESCALER*/  | 9UL<<0/*SCLL*/  | 3UL<<8/*SCLH*/  | 3UL<<16 /*SDADEL*/  | 3UL<<20 /*SCLDEL*/;
+	I2C4->CR1 = I2C_CR1_BASICS;
+
+	I2C4->CR1 |= 1UL; // Enable
+
+	NVIC_SetPriority(I2C4_EV_IRQn, 0b0101);
+	NVIC_EnableIRQ(I2C4_EV_IRQn);
+	NVIC_SetPriority(DMA1_Stream1_IRQn, 0b0101);
+	NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 
 }
 
@@ -508,11 +568,11 @@ void dcmi_start_dma(void *data, int size)
 	__DSB(); __ISB();
 }
 
-void trig()
+void trig(int idx)
 {
 	static volatile uint8_t b[2] = {0xa4, 1};
-	epc_i2c_write(EPC02_ADDR, b, 2);
-	while(epc_i2c_is_busy());
+	epc_i2c_write(buses[idx], addrs[idx], b, 2);
+	while(epc_i2c_is_busy(buses[idx]));
 }
 
 volatile uint8_t epc_wrbuf[16];// __attribute__((section(".data_dtcm"))); // to skip cache
@@ -621,49 +681,49 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 }
 
 
-void epc_clk_div(int div)
+void epc_clk_div(int idx, int div)
 {
 	epc_wrbuf[0] = 0x85;
 	epc_wrbuf[1] = div-1;
-	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 }
 
-void epc_dis_leds()
+void epc_dis_leds(int idx)
 {
 	epc_wrbuf[0] = 0x90;
 	epc_wrbuf[1] = 0b11001000; // leds disabled
-	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 }
 
-void epc_ena_leds()
+void epc_ena_leds(int idx)
 {
 	epc_wrbuf[0] = 0x90;
 	epc_wrbuf[1] = 0b11101000; // LED2 output on
-	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 }
 
-void epc_greyscale()
+void epc_greyscale(int idx)
 {
 	epc_wrbuf[0] = 0x92;
 	epc_wrbuf[1] = 0b11000100; // greyscale modulation
-	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 }
 
-void epc_2dcs()
+void epc_2dcs(int idx)
 {
 	epc_wrbuf[0] = 0x92;
 	epc_wrbuf[1] = 0b00010100; // 2dcs modulation
-	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 }
 
-void epc_4dcs()
+void epc_4dcs(int idx)
 {
 	epc_wrbuf[0] = 0x92;
 	epc_wrbuf[1] = 0b00110100; // 4dcs modulation
-	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 }
 
-void epc_intlen(uint8_t multiplier, uint16_t time)
+void epc_intlen(int idx, uint8_t multiplier, uint16_t time)
 {
 	int intlen = ((int)time<<2)-1;
 	epc_wrbuf[0] = 0xA1;
@@ -671,7 +731,7 @@ void epc_intlen(uint8_t multiplier, uint16_t time)
 	epc_wrbuf[2] = (intlen&0xff00)>>8;
 	epc_wrbuf[3] = intlen&0xff;
 
-	epc_i2c_write(EPC02_ADDR, epc_wrbuf, 4);
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 4);
 }
 
 void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int threshold /*mm*/, int offset_mm, int clk_div)
@@ -1021,6 +1081,7 @@ static epc_img_t mono_long, mono_short __attribute__((aligned(4)));
 
 void top_init()
 {
+	int idx = 0;
 	delay_ms(300);
 	EPC10V_ON();
 	EPC5V_ON();
@@ -1031,7 +1092,7 @@ void top_init()
 	delay_ms(300);
 
 
-	epc_i2c_init();
+	epc01_i2c_init();
 
 	/*
 		Even with 40cm cable, 40MHz (div 2) works well!
@@ -1041,37 +1102,37 @@ void top_init()
 	{
 		epc_wrbuf[0] = 0x89; 
 		epc_wrbuf[1] = (3 /*TCMI clock div 2..16, default 4*/ -1) | 0<<7 /*add clock delay?*/;
-		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-		while(epc_i2c_is_busy());
+		epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+		while(epc_i2c_is_busy(buses[idx]));
 	}
 
 	{
 		epc_wrbuf[0] = 0xcb; // i2c&tcmi control
 		epc_wrbuf[1] = 0b01101111; // saturation bit, split mode, gated dclk, ESM
-		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-		while(epc_i2c_is_busy());
+		epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+		while(epc_i2c_is_busy(buses[idx]));
 	}
 
 	{
 		epc_wrbuf[0] = 0x90; // led driver control
 		epc_wrbuf[1] = 0b11001000;
-		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-		while(epc_i2c_is_busy());
+		epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+		while(epc_i2c_is_busy(buses[idx]));
 	}
 
 	{
 		epc_wrbuf[0] = 0x92; // modulation select
 		epc_wrbuf[1] = 0b11000100; // grayscale
-		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-		while(epc_i2c_is_busy());
+		epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+		while(epc_i2c_is_busy(buses[idx]));
 	}
 
 /*
 	{
 		epc_wrbuf[0] = 0xcc; // tcmi polarity settings
 		epc_wrbuf[1] = 1<<7; //saturate data;
-		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
-		while(epc_i2c_is_busy());
+		epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+		while(epc_i2c_is_busy(buses[idx]));
 	}
 */
 
@@ -1086,7 +1147,7 @@ void top_init()
 	// Take a dummy frame, which will eventually output the end-of-frame sync marker, to get the DCMI sync marker parser in the right state
 	{
 		dcmi_start_dma(&mono_short, SIZEOF_MONO);
-		trig();
+		trig(idx);
 		delay_ms(100);
 	}
 
@@ -1183,25 +1244,26 @@ void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, i
 
 int run_offset_cal()
 {
-	epc_ena_leds();
-	while(epc_i2c_is_busy());
+	int idx = 0;
+	epc_ena_leds(idx);
+	while(epc_i2c_is_busy(buses[idx]));
 
-	epc_4dcs();
-	while(epc_i2c_is_busy());
+	epc_4dcs(idx);
+	while(epc_i2c_is_busy(buses[idx]));
 
 	for(int clkdiv=1; clkdiv < 4; clkdiv++)
 	{
-		epc_clk_div(clkdiv);
-		while(epc_i2c_is_busy());
+		epc_clk_div(idx, clkdiv);
+		while(epc_i2c_is_busy(buses[idx]));
 
 		int int_time = 5;
 		while(1)
 		{
-			epc_intlen(1, int_time);
-			while(epc_i2c_is_busy());
+			epc_intlen(idx, 1, int_time);
+			while(epc_i2c_is_busy(buses[idx]));
 
 			dcmi_start_dma(&dcsa, SIZEOF_4DCS);
-			trig();
+			trig(idx);
 			LED_ON();
 			while(!epc_capture_finished) ;
 			epc_capture_finished = 0;
@@ -1385,6 +1447,7 @@ static int32_t calc_outside_stray_estimate(uint8_t* ampl_in, uint16_t* dist_in, 
 
 void epc_test()
 {
+	int idx = 0;
 	int cnt = 0;
 	while(1)
 	{
@@ -1410,24 +1473,24 @@ void epc_test()
 		*/
 
 								raspi_tx.timestamps[0] = timer_10k;
-		epc_clk_div(3);
-		while(epc_i2c_is_busy());
+		epc_clk_div(idx, 3);
+		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_dis_leds();
-		while(epc_i2c_is_busy());
+		epc_dis_leds(idx);
+		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_2dcs();
-		while(epc_i2c_is_busy());
+		epc_2dcs(idx);
+		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_intlen(8, 200);
-		while(epc_i2c_is_busy());
+		epc_intlen(idx, 8, 200);
+		while(epc_i2c_is_busy(buses[idx]));
 		;
 
 								raspi_tx.timestamps[1] = timer_10k;
 
 
 		dcmi_start_dma(&dcsa, SIZEOF_2DCS);
-		trig();
+		trig(idx);
 		LED_ON();
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
@@ -1443,13 +1506,13 @@ void epc_test()
 			Short exp
 			Purpose: Same as the previous, at different freq
 		*/
-		epc_clk_div(1);
-		while(epc_i2c_is_busy());
-		epc_intlen(24, 200);
-		while(epc_i2c_is_busy());
+		epc_clk_div(idx, 1);
+		while(epc_i2c_is_busy(buses[idx]));
+		epc_intlen(idx, 24, 200);
+		while(epc_i2c_is_busy(buses[idx]));
 
 		dcmi_start_dma(&dcsb, SIZEOF_2DCS);
-		trig();
+		trig(idx);
 		LED_ON();
 
 								raspi_tx.timestamps[3] = timer_10k;
@@ -1482,15 +1545,15 @@ void epc_test()
 			Purpose: General purpose monochrome, HDR long
 		*/
 
-		epc_greyscale();
-		while(epc_i2c_is_busy());
+		epc_greyscale(idx);
+		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_intlen(120, 1000);
-		while(epc_i2c_is_busy());
+		epc_intlen(idx, 120, 1000);
+		while(epc_i2c_is_busy(buses[idx]));
 
 		dcmi_start_dma(&mono_long, SIZEOF_MONO);
 
-		trig();
+		trig(idx);
 		LED_ON();
 
 		// Calculate the previous
@@ -1515,12 +1578,12 @@ void epc_test()
 			Purpose: General purpose monochrome, HDR short
 		*/
 
-		epc_intlen(120, 250);
-		while(epc_i2c_is_busy());
+		epc_intlen(idx, 120, 250);
+		while(epc_i2c_is_busy(buses[idx]));
 
 		dcmi_start_dma(&mono_short, SIZEOF_MONO);
 
-		trig();
+		trig(idx);
 		LED_ON();
 
 		// do something useful:
@@ -1545,20 +1608,20 @@ void epc_test()
 			Purpose: Long-distance approximate readings for ignoring too-far points.
 		*/
 
-		epc_clk_div(3);
-		while(epc_i2c_is_busy());
+		epc_clk_div(idx, 3);
+		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_ena_leds();
-		while(epc_i2c_is_busy());
+		epc_ena_leds(idx);
+		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_2dcs();
-		while(epc_i2c_is_busy());
+		epc_2dcs(idx);
+		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_intlen(8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);
-		while(epc_i2c_is_busy());
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);
+		while(epc_i2c_is_busy(buses[idx]));
 
 		dcmi_start_dma(&dcsa, SIZEOF_2DCS);
-		trig();
+		trig(idx);
 		LED_ON();
 		while(!epc_capture_finished) ;
 		epc_capture_finished = 0;
@@ -1578,14 +1641,14 @@ void epc_test()
 		*/
 
 
-		epc_clk_div(2);
-		while(epc_i2c_is_busy());
+		epc_clk_div(idx, 2);
+		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_intlen(8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);
-		while(epc_i2c_is_busy());
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);
+		while(epc_i2c_is_busy(buses[idx]));
 
 		dcmi_start_dma(&dcsb, SIZEOF_2DCS);
-		trig();
+		trig(idx);
 		LED_ON();
 
 
@@ -1626,17 +1689,17 @@ void epc_test()
 		static uint16_t actual_dist[3*EPC_XS*EPC_YS];
 
 
-		epc_clk_div(1);
-		while(epc_i2c_is_busy());
+		epc_clk_div(idx, 1);
+		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_4dcs();
-		while(epc_i2c_is_busy());
+		epc_4dcs(idx);
+		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_intlen(8, SHORTEST_INTEGRATION);
-		while(epc_i2c_is_busy());
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION);
+		while(epc_i2c_is_busy(buses[idx]));
 
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
-		trig();
+		trig(idx);
 		LED_ON();
 
 		// Calculate the previous
@@ -1661,11 +1724,11 @@ void epc_test()
 			Purpose: The real thing continues.
 		*/
 
-		epc_intlen(8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER);
-		while(epc_i2c_is_busy());
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER);
+		while(epc_i2c_is_busy(buses[idx]));
 
 		dcmi_start_dma(&dcsb, SIZEOF_4DCS);
-		trig();
+		trig(idx);
 		LED_ON();
 
 
@@ -1703,11 +1766,11 @@ void epc_test()
 			Purpose: The real thing continues.
 		*/
 
-		epc_intlen(8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER);
-		while(epc_i2c_is_busy());
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER);
+		while(epc_i2c_is_busy(buses[idx]));
 
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
-		trig();
+		trig(idx);
 		LED_ON();
 
 		// Calculate the previous
@@ -1963,7 +2026,7 @@ void main()
 
 	FLASH->ACR = 1UL<<9 /* ART accelerator enable (caches) */ | 1UL<<8 /*prefetch enable*/ | 7UL /*7 wait states*/;
 	RCC->CFGR = 0b100UL<<13 /*APB2 div 2*/ | 0b101UL<<10 /*APB1 div 4*/;
-	RCC->DCKCFGR2 = 0b01UL<<4 /*USART3 = sysclk*/ | 0b00UL<<20 /*I2C3 = APB1clk*/;
+	RCC->DCKCFGR2 = 0b01UL<<4 /*USART3 = sysclk*/ | 0b00UL<<22 /*I2C4 = APB1clk*/ | 0b00UL<<20 /*I2C3 = APB1clk*/;
 
 	while(!(RCC->CR & 1UL<<25)) ; // Wait for PLL
 	RCC->CFGR |= 0b10; // Change PLL to system clock
@@ -1976,7 +2039,7 @@ void main()
 	__ISB();
 
 	RCC->AHB2ENR = 1UL<<0 /*DCMI*/;
-	RCC->APB1ENR |= 1UL<<18 /*USART3*/ | 1UL<<23 /*I2C3*/ | 1UL<<3 /*TIM5*/ | 1UL<<14 /*SPI2*/;
+	RCC->APB1ENR |= 1UL<<18 /*USART3*/ | 1UL<<24 /*I2C4*/ | 1UL<<23 /*I2C3*/ | 1UL<<3 /*TIM5*/ | 1UL<<14 /*SPI2*/;
 	RCC->APB2ENR = 1UL<<14 /*SYSCFG*/ | 1UL<<8 /*ADC1*/ | 1UL<<20 /*SPI5*/;
 
 	IO_TO_GPO(GPIOA,14);
@@ -2009,6 +2072,7 @@ void main()
 	*/
 
 
+#ifdef USE_UART
 	IO_TO_ALTFUNC(GPIOB, 10);
 	IO_TO_ALTFUNC(GPIOB, 11);
 	IO_SET_ALTFUNC(GPIOB, 10, 7);
@@ -2018,7 +2082,7 @@ void main()
 //	USART3->CR3 = 1UL<<6 /*RX DMA*/;
 
 	USART3->CR1 = 0UL<<15 /*Oversamp:16*/ | 0UL<<5 /*RX interrupt*/ | 1UL<<3 /*TX ena*/ | 1UL<<2 /*RX ena*/ |  1UL /*USART ENA*/;
-
+#endif
 
 	/*	
 		ADC  @ APB2 (108 MHz)
@@ -2100,6 +2164,8 @@ void main()
 	EPC23_RSTN_HIGH();
 	delay_ms(100);
 */
+
+	// Raspi SPI:
 
 	IO_ALTFUNC(GPIOB, 12, 5);
 	IO_ALTFUNC(GPIOB, 13, 5);
