@@ -28,7 +28,7 @@ void save_flash_settings(); // don't do too often
 
 typedef struct __attribute__((packed)) __attribute__((aligned(4)))
 {
-	int32_t offsets[4];
+	int32_t offsets[4][4];
 } settings_t;
 
 extern settings_t settings;

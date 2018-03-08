@@ -35,6 +35,7 @@
 #define EPC_SEL2() LO(GPIOE,0);
 #define EPC_SEL3() LO(GPIOE,1);
 
+
 /*
 	Even though the sensors support 4 different I2C addresses, to reduce the bus capacitance, only two sensors share the I2C bus.
 	Hence, two I2C peripherals are used to access the four sensors.
@@ -575,6 +576,25 @@ void trig(int idx)
 	while(epc_i2c_is_busy(buses[idx]));
 }
 
+void epc_select(uint8_t idx)
+{
+	__DSB(); __ISB();
+	EPC_DESEL();
+	__asm__ __volatile__ ("nop");
+	__asm__ __volatile__ ("nop");
+	__asm__ __volatile__ ("nop");
+	__asm__ __volatile__ ("nop");
+	switch(idx)
+	{
+		case 0: EPC_SEL0(); break;
+		case 1: EPC_SEL1(); break;
+		case 2: EPC_SEL2(); break;
+		case 3: EPC_SEL3(); break;
+		default: break;
+	}
+}
+
+
 volatile uint8_t epc_wrbuf[16];// __attribute__((section(".data_dtcm"))); // to skip cache
 volatile uint8_t epc_rdbuf[16];// __attribute__((section(".data_dtcm"))); // to skip cache
 
@@ -1081,7 +1101,6 @@ static epc_img_t mono_long, mono_short __attribute__((aligned(4)));
 
 void top_init()
 {
-	int idx = 0;
 	delay_ms(300);
 	EPC10V_ON();
 	EPC5V_ON();
@@ -1089,73 +1108,84 @@ void top_init()
 	EPCNEG10V_ON();
 	delay_ms(100);
 	EPC01_RSTN_HIGH();
+	delay_ms(5);
+	EPC23_RSTN_HIGH();
 	delay_ms(300);
 
 
 	epc01_i2c_init();
+	epc23_i2c_init();
 
 	/*
 		Even with 40cm cable, 40MHz (div 2) works well!
 
 	*/
 
+	for(int idx = 0; idx < N_SENSORS; idx++)
 	{
-		epc_wrbuf[0] = 0x89; 
-		epc_wrbuf[1] = (3 /*TCMI clock div 2..16, default 4*/ -1) | 0<<7 /*add clock delay?*/;
-		epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
-		while(epc_i2c_is_busy(buses[idx]));
-	}
 
-	{
-		epc_wrbuf[0] = 0xcb; // i2c&tcmi control
-		epc_wrbuf[1] = 0b01101111; // saturation bit, split mode, gated dclk, ESM
-		epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
-		while(epc_i2c_is_busy(buses[idx]));
-	}
+		{
+			epc_wrbuf[0] = 0x89; 
+			epc_wrbuf[1] = (3 /*TCMI clock div 2..16, default 4*/ -1) | 0<<7 /*add clock delay?*/;
+			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+			while(epc_i2c_is_busy(buses[idx]));
+		}
 
-	{
-		epc_wrbuf[0] = 0x90; // led driver control
-		epc_wrbuf[1] = 0b11001000;
-		epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
-		while(epc_i2c_is_busy(buses[idx]));
-	}
+		{
+			epc_wrbuf[0] = 0xcb; // i2c&tcmi control
+			epc_wrbuf[1] = 0b01101111; // saturation bit, split mode, gated dclk, ESM
+			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+			while(epc_i2c_is_busy(buses[idx]));
+		}
 
-	{
-		epc_wrbuf[0] = 0x92; // modulation select
-		epc_wrbuf[1] = 0b11000100; // grayscale
-		epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
-		while(epc_i2c_is_busy(buses[idx]));
-	}
+		{
+			epc_wrbuf[0] = 0x90; // led driver control
+			epc_wrbuf[1] = 0b11001000;
+			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+			while(epc_i2c_is_busy(buses[idx]));
+		}
 
-/*
-	{
-		epc_wrbuf[0] = 0xcc; // tcmi polarity settings
-		epc_wrbuf[1] = 1<<7; //saturate data;
-		epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
-		while(epc_i2c_is_busy(buses[idx]));
+		{
+			epc_wrbuf[0] = 0x92; // modulation select
+			epc_wrbuf[1] = 0b11000100; // grayscale
+			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+			while(epc_i2c_is_busy(buses[idx]));
+		}
+
+	/*
+		{
+			epc_wrbuf[0] = 0xcc; // tcmi polarity settings
+			epc_wrbuf[1] = 1<<7; //saturate data;
+			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+			while(epc_i2c_is_busy(buses[idx]));
+		}
+	*/
 	}
-*/
 
 	EPCLEDV_ON();
 
 	delay_ms(100);
 
+	EPC_DESEL(); // just in case... To avoid mistakes
 	EPC_SEL0();
 
 	epc_dcmi_init();
 
 	// Take a dummy frame, which will eventually output the end-of-frame sync marker, to get the DCMI sync marker parser in the right state
+	// Any camera works for this, let's use 0.
 	{
 		dcmi_start_dma(&mono_short, SIZEOF_MONO);
-		trig(idx);
+		trig(0);
 		delay_ms(100);
 	}
+
+	EPC_DESEL();
 
 
 }
 
 #define OFFSET_CALC_Y_IGNORE (15)
-#define OFFSET_CALC_X_IGNORE (50)
+#define OFFSET_CALC_X_IGNORE (55)
 #define OFFSET_CALC_NUM_PX   ((EPC_YS-2*OFFSET_CALC_Y_IGNORE)*(EPC_XS-2*OFFSET_CALC_X_IGNORE))
 
 void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, int *n_valids, int *dist_sum)
@@ -1242,9 +1272,15 @@ void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, i
 
 
 
-int run_offset_cal()
+int run_offset_cal(uint8_t idx)
 {
-	int idx = 0;
+	if(idx > N_SENSORS-1)
+		return 1;
+
+	__DSB(); __ISB();
+
+	epc_select(idx);
+
 	epc_ena_leds(idx);
 	while(epc_i2c_is_busy(buses[idx]));
 
@@ -1291,7 +1327,7 @@ int run_offset_cal()
 			}
 			else
 			{
-				settings.offsets[clkdiv] = -1*(dist_sum/n_valids) + 50;
+				settings.offsets[idx][clkdiv] = -1*(dist_sum/n_valids) + 50;
 				break;
 			}
 
@@ -1444,18 +1480,50 @@ static int32_t calc_outside_stray_estimate(uint8_t* ampl_in, uint16_t* dist_in, 
 }
 
 #define SHORTEST_INTEGRATION 125
+static int err_cnt = 0;
+
+int poll_capt_with_timeout()
+{
+	int timeout = 1600000; // 40000 tested to be barely ok with exposure time 125*5*5
+	while(!epc_capture_finished && timeout>0) timeout--;
+	epc_capture_finished = 0;
+
+	if(timeout == 0)
+	{
+		// Disable the stream
+		DMA2_Stream7->CR = 1UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ |
+				   0b10UL<<13 /*32-bit mem*/ | 0b10UL<<11 /*32-bit periph*/ |
+			           1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
+
+		DMA_CLEAR_INTFLAGS(DMA2, 7);
+
+		err_cnt++;
+		raspi_tx.dbg_i32[6] = err_cnt;
+		if(err_cnt > 200)
+		{
+			error(55);
+		}
+		return 1;
+	}
+
+//	while(!epc_capture_finished) ;
+//	epc_capture_finished = 0;
+
+	return 0;
+}
 
 void epc_test()
 {
 	int idx = 0;
 	int cnt = 0;
+
 	while(1)
 	{
 		raspi_tx.dbg_id = raspi_rx[4];
 
-		raspi_tx.timestamps[21] = settings.offsets[1];
-		raspi_tx.timestamps[22] = settings.offsets[2];
-		raspi_tx.timestamps[23] = settings.offsets[3];
+		raspi_tx.timestamps[21] = settings.offsets[idx][1];
+		raspi_tx.timestamps[22] = settings.offsets[idx][2];
+		raspi_tx.timestamps[23] = settings.offsets[idx][3];
 
 
 		timer_10k = 0;
@@ -1463,6 +1531,7 @@ void epc_test()
 		raspi_tx.status = 100;
 
 		memset(ignore, 0, sizeof(ignore));
+		epc_select(idx);
 
 		/*
 			6.66 MHz
@@ -1492,8 +1561,7 @@ void epc_test()
 		dcmi_start_dma(&dcsa, SIZEOF_2DCS);
 		trig(idx);
 		LED_ON();
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
+		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 								raspi_tx.timestamps[2] = timer_10k;
@@ -1528,8 +1596,7 @@ void epc_test()
 								raspi_tx.timestamps[4] = timer_10k;
 
 
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
+		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 
@@ -1562,8 +1629,7 @@ void epc_test()
 		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
 
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
+		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 
@@ -1591,8 +1657,7 @@ void epc_test()
 		//process_bw(raspi_tx.ambient, &mono_long);
 
 
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
+		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 
@@ -1623,8 +1688,7 @@ void epc_test()
 		dcmi_start_dma(&dcsa, SIZEOF_2DCS);
 		trig(idx);
 		LED_ON();
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
+		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 
@@ -1657,15 +1721,14 @@ void epc_test()
 
 		// Calculate the previous
 		// We don't need fancy HDR combining here, since both exposures simply update the ignore list.
-		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 6000, settings.offsets[3], 3);
+		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 6000, settings.offsets[idx][3], 3);
 
 		if(raspi_rx[4] == 3) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
 								raspi_tx.timestamps[10] = timer_10k;
 
 
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
+		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 
@@ -1703,12 +1766,11 @@ void epc_test()
 		LED_ON();
 
 		// Calculate the previous
-		calc_toofar_ignore_from_2dcs(ignore, &dcsb, 6000, settings.offsets[2], 2);
+		calc_toofar_ignore_from_2dcs(ignore, &dcsb, 6000, settings.offsets[idx][2], 2);
 
 		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
+		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 								raspi_tx.timestamps[12] = timer_10k;
@@ -1736,7 +1798,7 @@ void epc_test()
 
 
 		// Calculate the previous
-		tof_calc_dist_ampl(&actual_ampl[0], &actual_dist[0], &dcsa, settings.offsets[1], 1);
+		tof_calc_dist_ampl(&actual_ampl[0], &actual_dist[0], &dcsa, settings.offsets[idx][1], 1);
 
 		if(raspi_rx[4] == 5) memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
 		if(raspi_rx[4] == 6) memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
@@ -1746,8 +1808,7 @@ void epc_test()
 
 
 
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
+		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 
@@ -1774,14 +1835,13 @@ void epc_test()
 		LED_ON();
 
 		// Calculate the previous
-		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[1], 1);
+		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[idx][1], 1);
 
 		if(raspi_rx[4] == 7) memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 8) memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
 
 
-		while(!epc_capture_finished) ;
-		epc_capture_finished = 0;
+		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 
@@ -1791,7 +1851,7 @@ void epc_test()
 		// All captures done.
 
 		// Calculate the last measurement:
-		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, settings.offsets[1], 1);
+		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1], 1);
 		if(raspi_rx[4] == 9)  memcpy(raspi_tx.dbg, &actual_ampl[2*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 10) memcpy(raspi_tx.dbg, &actual_dist[2*EPC_XS*EPC_YS], 2*160*60);
 
@@ -1845,15 +1905,16 @@ void epc_test()
 								raspi_tx.timestamps[19] = timer_10k;
 		raspi_tx.status = 255;
 
-		while(timer_10k < 7500)
+		while(timer_10k < 2500)
 		{
 			if(new_rx)
 			{
 				if(*((volatile uint32_t*)&raspi_rx[0]) == 0xca0ff5e7) // offset calibration cmd
 				{
 					*((volatile uint32_t*)&raspi_rx[0]) = 0; // zero it out so that we don't do it again
+					uint8_t sensor_idx = *((volatile uint8_t*)&raspi_rx[4]);
 					__DSB(); __ISB();
-					int ret = run_offset_cal();
+					int ret = run_offset_cal(sensor_idx);
 					raspi_tx.dbg_i32[7] = ret;
 				}
 
@@ -1864,6 +1925,10 @@ void epc_test()
 		}
 
 		cnt++;
+
+
+		idx++;
+		if(idx >= N_SENSORS) idx = 0;
 	}
 
 
