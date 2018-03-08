@@ -131,6 +131,13 @@ void error(int code)
 	EPC5V_OFF();
 	EPCLEDV_OFF();
 	EPC_DESEL();
+	// Disable all other interrupts, but leave the one required for handling reflashing SPI message.
+	NVIC_DisableIRQ(I2C3_EV_IRQn);
+	NVIC_DisableIRQ(DMA1_Stream2_IRQn);
+	NVIC_DisableIRQ(DMA2_Stream7_IRQn);
+	NVIC_DisableIRQ(TIM5_IRQn);
+	__enable_irq();
+
 	int i = 0;
 	while(1)
 	{
@@ -380,6 +387,7 @@ void epc_i2c_init()
 	NVIC_EnableIRQ(DMA1_Stream2_IRQn);
 
 }
+
 
 #define EPC_XS 160
 #define EPC_YS 60
@@ -864,7 +872,7 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 	}
 }
 
-#define HDR_EXP_MULTIPLIER 4 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
+#define HDR_EXP_MULTIPLIER 5 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
 
 #define STRAY_CORR_LEVEL 2000 // smaller -> more correction
 #define STRAY_BLANKING_LVL 40 // smaller -> more easily ignored
@@ -1025,14 +1033,17 @@ void top_init()
 
 	epc_i2c_init();
 
-#if 0
+	/*
+		Even with 40cm cable, 40MHz (div 2) works well!
+
+	*/
+
 	{
 		epc_wrbuf[0] = 0x89; 
-		epc_wrbuf[1] = (6 /*TCMI clock div 2..16*/ -1) | 0<<7 /*add clock delay*/;
+		epc_wrbuf[1] = (3 /*TCMI clock div 2..16, default 4*/ -1) | 0<<7 /*add clock delay?*/;
 		epc_i2c_write(EPC02_ADDR, epc_wrbuf, 2);
 		while(epc_i2c_is_busy());
 	}
-#endif
 
 	{
 		epc_wrbuf[0] = 0xcb; // i2c&tcmi control
@@ -1370,6 +1381,8 @@ static int32_t calc_outside_stray_estimate(uint8_t* ampl_in, uint16_t* dist_in, 
 
 }
 
+#define SHORTEST_INTEGRATION 125
+
 void epc_test()
 {
 	int cnt = 0;
@@ -1442,7 +1455,7 @@ void epc_test()
 								raspi_tx.timestamps[3] = timer_10k;
 
 		// Calculate the previous
-	//	calc_interference_ignore_from_2dcs(ignore, &dcsa, 500);
+		calc_interference_ignore_from_2dcs(ignore, &dcsa, 60);
 
 		if(raspi_rx[4] == 1) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
@@ -1481,7 +1494,7 @@ void epc_test()
 		LED_ON();
 
 		// Calculate the previous
-	//	calc_interference_ignore_from_2dcs(ignore, &dcsb, 500);
+		calc_interference_ignore_from_2dcs(ignore, &dcsb, 60);
 
 		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 
@@ -1541,7 +1554,7 @@ void epc_test()
 		epc_2dcs();
 		while(epc_i2c_is_busy());
 
-		epc_intlen(8, 2000);
+		epc_intlen(8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);
 		while(epc_i2c_is_busy());
 
 		dcmi_start_dma(&dcsa, SIZEOF_2DCS);
@@ -1568,7 +1581,7 @@ void epc_test()
 		epc_clk_div(2);
 		while(epc_i2c_is_busy());
 
-		epc_intlen(8, 1000);
+		epc_intlen(8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);
 		while(epc_i2c_is_busy());
 
 		dcmi_start_dma(&dcsb, SIZEOF_2DCS);
@@ -1619,7 +1632,7 @@ void epc_test()
 		epc_4dcs();
 		while(epc_i2c_is_busy());
 
-		epc_intlen(8, 125);
+		epc_intlen(8, SHORTEST_INTEGRATION);
 		while(epc_i2c_is_busy());
 
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
@@ -1648,7 +1661,7 @@ void epc_test()
 			Purpose: The real thing continues.
 		*/
 
-		epc_intlen(8, 500);
+		epc_intlen(8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER);
 		while(epc_i2c_is_busy());
 
 		dcmi_start_dma(&dcsb, SIZEOF_4DCS);
@@ -1690,7 +1703,7 @@ void epc_test()
 			Purpose: The real thing continues.
 		*/
 
-		epc_intlen(8, 2000);
+		epc_intlen(8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER);
 		while(epc_i2c_is_busy());
 
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
