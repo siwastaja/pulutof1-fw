@@ -1101,7 +1101,7 @@ static epc_img_t mono_long, mono_short __attribute__((aligned(4)));
 
 void top_init()
 {
-	delay_ms(300);
+	delay_ms(3000);
 	EPC10V_ON();
 	EPC5V_ON();
 	delay_ms(100);
@@ -1520,6 +1520,7 @@ void epc_test()
 	while(1)
 	{
 		raspi_tx.dbg_id = raspi_rx[4];
+		raspi_tx.sensor_idx = idx;
 
 		raspi_tx.timestamps[21] = settings.offsets[idx][1];
 		raspi_tx.timestamps[22] = settings.offsets[idx][2];
@@ -1905,10 +1906,14 @@ void epc_test()
 								raspi_tx.timestamps[19] = timer_10k;
 		raspi_tx.status = 255;
 
-		while(timer_10k < 2500)
+		while(timer_10k < 20000)
 		{
 			if(new_rx)
 			{
+				new_rx = 0;
+				if(new_rx_len > 8)
+					raspi_tx.status = 150;
+
 				if(*((volatile uint32_t*)&raspi_rx[0]) == 0xca0ff5e7) // offset calibration cmd
 				{
 					*((volatile uint32_t*)&raspi_rx[0]) = 0; // zero it out so that we don't do it again
@@ -1918,9 +1923,6 @@ void epc_test()
 					raspi_tx.dbg_i32[7] = ret;
 				}
 
-				new_rx = 0;
-				if(new_rx_len > 8)
-					raspi_tx.status = 150;
 			}
 		}
 

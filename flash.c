@@ -105,10 +105,9 @@ void save_flash_settings()
 	unlock_flash();
 	flash_erase_sector(7);
 
-
 	FLASH->CR = 0b10<<8 /*32-bit parallellism*/ | 1UL /*activate programming*/;
 
-	volatile uint32_t* p_flash = (uint32_t*)(FLASH_OFFSET + 0x000C0000 /*sector 7*/);
+	volatile uint32_t* p_flash = (volatile uint32_t*)(FLASH_OFFSET + 0x000C0000 /*sector 7*/);
 	volatile uint32_t* p_ram = (volatile uint32_t* volatile)(&settings);
 
 	for(int i=0; i<sizeof(settings)/4; i++)

@@ -178,9 +178,9 @@ extern void hwtest_main();
 
 void refresh_settings()
 {
-	uint32_t* settings_begin  = (uint32_t*)&_SETTINGS_BEGIN;
-	uint32_t* settings_end    = (uint32_t*)&_SETTINGS_END;
-	uint32_t* settings_i_begin = (uint32_t*)&_SETTINGS_I_BEGIN;
+	volatile uint32_t* settings_begin  = (volatile uint32_t*)&_SETTINGS_BEGIN;
+	volatile uint32_t* settings_end    = (volatile uint32_t*)&_SETTINGS_END;
+	volatile uint32_t* settings_i_begin = (volatile uint32_t*)&_SETTINGS_I_BEGIN;
 
 	while(settings_begin < settings_end)
 	{
@@ -188,6 +188,7 @@ void refresh_settings()
 		settings_begin++;
 		settings_i_begin++;
 	}
+	__DSB(); __ISB();
 }
 
 void stm32init(void)
