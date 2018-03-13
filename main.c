@@ -953,7 +953,7 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 	}
 }
 
-#define SHORTEST_INTEGRATION 125 //125
+#define SHORTEST_INTEGRATION 125
 #define HDR_EXP_MULTIPLIER 5 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
 
 #define STRAY_CORR_LEVEL 2000 // smaller -> more correction
@@ -1103,7 +1103,7 @@ void init_raspi_tx()
 
 static uint8_t ignore[EPC_XS*EPC_YS] __attribute__((section(".dtcm_bss")));
 static epc_4dcs_t dcsa, dcsb __attribute__((aligned(4)));
-static epc_img_t mono_long, mono_short __attribute__((aligned(4)));
+static epc_img_t mono_comp __attribute__((aligned(4)));
 
 void top_init()
 {
@@ -1206,7 +1206,7 @@ void top_init()
 	// Take a dummy frame, which will eventually output the end-of-frame sync marker, to get the DCMI sync marker parser in the right state
 	// Any camera works for this, let's use 0.
 	{
-		dcmi_start_dma(&mono_short, SIZEOF_MONO);
+		dcmi_start_dma(&mono_comp, SIZEOF_MONO);
 		trig(0);
 		delay_ms(100);
 	}
@@ -1732,66 +1732,6 @@ void epc_test()
 		if(raspi_rx[4] == 1) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 #endif
 
-		epc_greyscale(idx);	// FOR THE NEXT
-		while(epc_i2c_is_busy(buses[idx]));
-		epc_intlen(idx, 120, 1000); // FOR THE NEXT
-		while(epc_i2c_is_busy(buses[idx]));
-
-
-		if(poll_capt_with_timeout()) continue;
-		LED_OFF();
-
-
-
-
-		/*
-			20 MHz
-			LEDS OFF
-			MONOCHROME
-			Long exp
-			Purpose: General purpose monochrome, HDR long
-		*/
-
-
-		dcmi_start_dma(&mono_long, SIZEOF_MONO);
-
-		trig(idx);
-		LED_ON();
-
-		// Calculate the previous
-		calc_interference_ignore_from_2dcs(ignore, &dcsb, 60);
-
-		epc_intlen(idx, 120, 250); // For the next
-		while(epc_i2c_is_busy(buses[idx]));
-
-
-#ifdef SEND_EXTRA
-		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
-#endif
-
-		if(poll_capt_with_timeout()) continue;
-		LED_OFF();
-
-
-
-		/*
-			20 MHz
-			LEDS OFF
-			MONOCHROME
-			Short exp
-			Purpose: General purpose monochrome, HDR short
-		*/
-
-
-		dcmi_start_dma(&mono_short, SIZEOF_MONO);
-
-		trig(idx);
-		LED_ON();
-
-		// do something useful:
-
-		//process_bw(raspi_tx.ambient, &mono_long);
-
 		epc_2dcs(idx); // For the next
 		while(epc_i2c_is_busy(buses[idx]));
 
@@ -1801,6 +1741,9 @@ void epc_test()
 		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
+#ifdef SEND_EXTRA
+		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+#endif
 
 
 
@@ -1823,40 +1766,36 @@ void epc_test()
 		trig(idx);
 		LED_ON();
 
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);  // for the next
+		// Calculate the previous
+		calc_interference_ignore_from_2dcs(ignore, &dcsb, 60);
+
+		epc_greyscale(idx);	// FOR THE NEXT
+		while(epc_i2c_is_busy(buses[idx]));
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // FOR THE NEXT
 		while(epc_i2c_is_busy(buses[idx]));
 
 		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 
-
-
 		/*
-			10 MHz (wrap at 15m)
-			LEDS ON
-			2DCS
+			20 MHz
+			LEDS OFF
+			MONOCHROME
 			Mid exp
-			Purpose: Same as previous
+			Purpose: Ambient light compensation monochrome
 		*/
 
-
-		epc_clk_div(idx, 2);
+		epc_clk_div(idx, 1);
 		while(epc_i2c_is_busy(buses[idx]));
 
-		dcmi_start_dma(&dcsb, SIZEOF_2DCS);
+		dcmi_start_dma(&mono_comp, SIZEOF_MONO);
+
 		trig(idx);
 		LED_ON();
 
-
-
 		// Calculate the previous
-		// We don't need fancy HDR combining here, since both exposures simply update the ignore list.
-		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 6000, settings.offsets[idx][3], 3);
-
-#ifdef SEND_EXTRA
-		if(raspi_rx[4] == 3) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
-#endif
+		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 5500, settings.offsets[idx][3], 3);
 
 		epc_4dcs(idx); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
@@ -1864,12 +1803,8 @@ void epc_test()
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
-
 		if(poll_capt_with_timeout()) continue;
-
 		LED_OFF();
-
-
 
 
 
@@ -1888,18 +1823,13 @@ void epc_test()
 		static uint16_t actual_dist[3*EPC_XS*EPC_YS];
 
 
-		epc_clk_div(idx, 1);
-		while(epc_i2c_is_busy(buses[idx]));
-
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
 		trig(idx);
 		LED_ON();
 
-		// Calculate the previous
-		calc_toofar_ignore_from_2dcs(ignore, &dcsb, 6000, settings.offsets[idx][2], 2);
 
 #ifdef SEND_EXTRA
-		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, mono_comp, sizeof(ignore));
 #endif
 
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
@@ -1935,8 +1865,6 @@ void epc_test()
 		if(raspi_rx[4] == 6) memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
 #endif
 
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
 
 
 
@@ -1949,6 +1877,7 @@ void epc_test()
 		raspi_tx.status = 20;
 
 
+
 		/*
 			20 MHz (wrap at 7.5m)
 			LEDS ON
@@ -1956,6 +1885,9 @@ void epc_test()
 			Long exp
 			Purpose: The real thing continues.
 		*/
+
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER); // for the next
+		while(epc_i2c_is_busy(buses[idx]));
 
 
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
