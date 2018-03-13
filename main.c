@@ -612,6 +612,7 @@ Process four DCS images, with offset_mm in millimeters. With clk_div=1, does the
 multiplies the result.
 */
 
+void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, int offset_mm, int clk_div) __attribute__((section(".text_itcm")));
 void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, int offset_mm, int clk_div)
 {
 	int16_t offset = offset_mm/clk_div;
@@ -675,12 +676,8 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 				if(dcs31<0) dist_i = -dist_i;
 
 				dist_i += offset;
-
-//				if(dist_i < 0) dist_i += TOF_TBL_PERIOD;
-//				else if(dist_i > TOF_TBL_PERIOD) dist_i -= TOF_TBL_PERIOD;
 				
 				dist_i *= clk_div;
-
 
 				if(dist_i < 1) dist_i = 1; else if(dist_i>6000) dist_i=6000;
 
@@ -1577,7 +1574,10 @@ Conclusion: >15 is the only place that can be optimized (tof_calc_dist_ampl, whi
 
 	Down to about 11.1ms
 
+	atan LUT moved to dtcm -> no difference, not even when measured during acquisition (so DMA to main SRAM is not a big penalty after all)
 
+
+	Moved tof_calc_dist_ampl to itcm -> no difference (meaning that ART accelerator just works)
 
 */
 
