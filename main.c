@@ -1,4 +1,5 @@
 #define SEND_EXTRA
+#define FAST_APPROX_AMPLITUDE
 
 #include <stdint.h>
 #include <string.h>
@@ -9,6 +10,8 @@
 #include "own_std.h"
 #include "tof_table.h"
 #include "flash.h"
+
+#include "epc635_seq_v10.c"
 
 #define LED_ON()  HI(GPIOF, 2)
 #define LED_OFF() LO(GPIOF, 2)
@@ -115,6 +118,7 @@ static const uint8_t addrs[N_SENSORS] =
 
 
 #define sq(x) ((x)*(x))
+#define abso(x) ((x<0)?(-x):(x))
 
 volatile int new_rx, new_rx_len;
 
@@ -475,7 +479,6 @@ typedef struct __attribute__((packed))
 #define SIZEOF_2DCS (sizeof(epc_2dcs_t)) //(EPC_XS*EPC_YS*2*2)
 #define SIZEOF_4DCS (sizeof(epc_4dcs_t)) //(EPC_XS*EPC_YS*2*4)
 
-
 volatile int epc_capture_finished = 0;
 void epc_dcmi_dma_inthandler()
 {
@@ -483,6 +486,8 @@ void epc_dcmi_dma_inthandler()
 	DMA_CLEAR_INTFLAGS(DMA2, 7);
 	epc_capture_finished = 1;
 }
+
+int poll_capt_with_timeout();
 
 void epc_shutdown_inthandler()
 {
@@ -620,7 +625,7 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 	for(int i=0; i < 160*60; i++)
 	{
 		uint16_t dist;
-		uint8_t ampl;
+		int ampl;
 
 		int16_t dcs0 = ((in->dcs[0].img[i]&0b0011111111111100)>>2)-2048;
 		int16_t dcs1 = ((in->dcs[1].img[i]&0b0011111111111100)>>2)-2048;
@@ -681,7 +686,11 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 
 				if(dist_i < 1) dist_i = 1; else if(dist_i>6000) dist_i=6000;
 
+#ifdef FAST_APPROX_AMPLITUDE
+				ampl = (abso(dcs20)+abso(dcs31))/30; if(ampl > 255) ampl = 255;
+#else
 				ampl = sqrt(sq(dcs20)+sq(dcs31))/23;
+#endif
 
 				dist = dist_i;
 
@@ -944,6 +953,7 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 	}
 }
 
+#define SHORTEST_INTEGRATION 125 //125
 #define HDR_EXP_MULTIPLIER 5 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
 
 #define STRAY_CORR_LEVEL 2000 // smaller -> more correction
@@ -1097,7 +1107,7 @@ static epc_img_t mono_long, mono_short __attribute__((aligned(4)));
 
 void top_init()
 {
-	delay_ms(3000);
+	delay_ms(300);
 	EPC10V_ON();
 	EPC5V_ON();
 	delay_ms(100);
@@ -1121,10 +1131,35 @@ void top_init()
 //	for(int idx = 0; idx < N_SENSORS; idx++)
 	for(int idx = 0; idx < 1; idx++)
 	{
+		delay_ms(10);
+
+		// Reprogram the sequencer binary:
+		for(int seq=0; seq<SEQ_LEN; seq++)
+		{
+			epc_i2c_write(buses[idx], addrs[idx], epc_seq[seq].d, epc_seq[seq].len);
+			while(epc_i2c_is_busy(buses[idx]));
+		}
+
+		delay_ms(10);
+
+
+		{
+			epc_wrbuf[0] = 0xaa; 
+			epc_wrbuf[1] = 4;
+			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+			while(epc_i2c_is_busy(buses[idx]));
+		}
+
+		{
+			epc_wrbuf[0] = 0xab; 
+			epc_wrbuf[1] = 4;
+			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+			while(epc_i2c_is_busy(buses[idx]));
+		}
 
 		{
 			epc_wrbuf[0] = 0xcc; // tcmi polarity settings
-			epc_wrbuf[1] = 1<<0 /*dclk rising edge*/ | 1<<7 /*saturate data*/; // EPC datasheet errata: bit 0 actually defaults to 1!
+			epc_wrbuf[1] = 1<<0 /*dclk rising edge*/ | 1<<7 /*saturate data*/; // bit 0 actually defaults to 1, at least on stock sequencer
 			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 			while(epc_i2c_is_busy(buses[idx]));
 		}
@@ -1182,12 +1217,15 @@ void top_init()
 }
 
 #define OFFSET_CALC_Y_IGNORE (15)
-#define OFFSET_CALC_X_IGNORE (55)
+#define OFFSET_CALC_X_IGNORE (60)
 #define OFFSET_CALC_NUM_PX   ((EPC_YS-2*OFFSET_CALC_Y_IGNORE)*(EPC_XS-2*OFFSET_CALC_X_IGNORE))
 
 void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, int *n_valids, int *dist_sum)
 {
 	int overexps = 0, underexps = 0, valids = 0, dist_accum = 0;
+
+	int smallest = 99999;
+	int biggest = -99999;
 
 	for(int yy=OFFSET_CALC_Y_IGNORE; yy < 60-OFFSET_CALC_Y_IGNORE; yy++)
 	{
@@ -1200,7 +1238,7 @@ void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, i
 			int16_t dcs2 = ((in->dcs[2].img[i]&0b0011111111111100)>>2)-2048;
 			int16_t dcs3 = ((in->dcs[3].img[i]&0b0011111111111100)>>2)-2048;
 
-			if(dcs0 < -1800 || dcs0 > 1800 || dcs1 < -1800 || dcs1 > 1800 || dcs2 < -1800 || dcs2 > 1800 || dcs3 < -1800 || dcs3 > 1800)
+			if(dcs0 < -1900 || dcs0 > 1900 || dcs1 < -1900 || dcs1 > 1900 || dcs2 < -1900 || dcs2 > 1900 || dcs3 < -1900 || dcs3 > 1900)
 			{
 				overexps++;
 			}
@@ -1251,6 +1289,9 @@ void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, i
 				
 					dist_i *= clk_div;
 
+					if(dist_i < smallest) smallest = dist_i;
+					if(dist_i > biggest) biggest = dist_i;
+
 					valids++;
 					dist_accum += dist_i;
 				}
@@ -1258,6 +1299,10 @@ void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, i
 			}
 		}
 	}
+
+	raspi_tx.dbg_i32[4] = smallest;
+	raspi_tx.dbg_i32[5] = biggest;
+	raspi_tx.dbg_i32[6] = valids;
 
 	*dist_sum = dist_accum;
 	*n_valids = valids;
@@ -1287,26 +1332,29 @@ int run_offset_cal(uint8_t idx)
 		epc_clk_div(idx, clkdiv);
 		while(epc_i2c_is_busy(buses[idx]));
 
-		int int_time = 5;
+		int int_time = 10;
 		while(1)
 		{
-			epc_intlen(idx, 1, int_time);
+			epc_intlen(idx, 8, int_time);
 			while(epc_i2c_is_busy(buses[idx]));
 
 			dcmi_start_dma(&dcsa, SIZEOF_4DCS);
 			trig(idx);
 			LED_ON();
-			while(!epc_capture_finished) ;
-			epc_capture_finished = 0;
+			if(poll_capt_with_timeout()) return 99;
 			LED_OFF();
 
 			int n_overs, n_unders, n_valids, dist_sum;
 
 			tof_calc_offset(&dcsa, clkdiv, &n_overs, &n_unders, &n_valids, &dist_sum);
 
-			if(n_overs > 20)
+			if(n_overs > 30)
+			{
+				raspi_tx.dbg_i32[4] = n_overs;
+				raspi_tx.dbg_i32[5] = n_unders;
+				raspi_tx.dbg_i32[6] = n_valids;
 				return 100+clkdiv;
-
+			}
 			if(int_time > 500)
 				return 200+clkdiv;
 
@@ -1322,7 +1370,7 @@ int run_offset_cal(uint8_t idx)
 			}
 			else
 			{
-				settings.offsets[idx][clkdiv] = -1*(dist_sum/n_valids) + 50;
+				settings.offsets[idx][clkdiv] = -1*(dist_sum/n_valids) + 150;
 				break;
 			}
 
@@ -1474,14 +1522,16 @@ static int32_t calc_outside_stray_estimate(uint8_t* ampl_in, uint16_t* dist_in, 
 
 }
 
-#define SHORTEST_INTEGRATION 125
 static int err_cnt = 0;
 
 int poll_capt_with_timeout()
 {
 	int timeout = 1600000; // 40000 tested to be barely ok with exposure time 125*5*5
-	while(!epc_capture_finished && timeout>0) timeout--;
-	epc_capture_finished = 0;
+
+	while(DMA2_Stream7->NDTR > 1 && timeout>0) timeout--;
+
+//	while(!epc_capture_finished && timeout>0) timeout--;
+//	epc_capture_finished = 0;
 
 	if(timeout == 0)
 	{
@@ -1506,6 +1556,7 @@ int poll_capt_with_timeout()
 
 	return 0;
 }
+
 
 /*
 
@@ -1579,6 +1630,27 @@ Conclusion: >15 is the only place that can be optimized (tof_calc_dist_ampl, whi
 
 	Moved tof_calc_dist_ampl to itcm -> no difference (meaning that ART accelerator just works)
 
+	amplitude calculation is taking the time: 5.1ms without!
+	With just sqrt removed (kept (x^2+y^2)/n): 5.5ms
+	sqrt is the problem
+	-> Fixed by approximation, seems good enough, really
+	This approximation slightly overestimates values where dcs31 and dcs20 are in the midrange - these values are good, so this overestimation plays for us.
+
+
+0:0.0 1:79.8 2:91.4
+
+79.8 ms to the end of the last capture,
+11.6ms processing after that to combine everything.
+
+	Nonmeasurable improvement by stopping polling when DMA data left count is 1.
+
+	Upping the readout freq to 80MHz didn't improve anything, still 79.8 ms, this is confusing.
+	Now there was some random data corruption visible on the 40cm FFC.
+
+
+	Upgrading the sequencer took from 79.8ms to 79.5ms
+
+
 */
 
 
@@ -1614,7 +1686,7 @@ void epc_test()
 			Purpose: to find other HF AC sources or other interferences to be ignored
 		*/
 
-//								raspi_tx.timestamps[0] = timer_10k;
+								raspi_tx.timestamps[0] = timer_10k;
 		epc_clk_div(idx, 3);
 		while(epc_i2c_is_busy(buses[idx]));
 
@@ -1634,9 +1706,7 @@ void epc_test()
 		LED_ON();
 		epc_intlen(idx, 24, 200);      // FOR THE NEXT, SEE BELOW
 		while(epc_i2c_is_busy(buses[idx]));
-								raspi_tx.timestamps[0] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
-								raspi_tx.timestamps[1] = timer_10k;
 		LED_OFF();
 
 
@@ -1668,9 +1738,7 @@ void epc_test()
 		while(epc_i2c_is_busy(buses[idx]));
 
 
-								raspi_tx.timestamps[2] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
-								raspi_tx.timestamps[3] = timer_10k;
 		LED_OFF();
 
 
@@ -1701,9 +1769,7 @@ void epc_test()
 		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 #endif
 
-								raspi_tx.timestamps[4] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
-								raspi_tx.timestamps[5] = timer_10k;
 		LED_OFF();
 
 
@@ -1732,9 +1798,7 @@ void epc_test()
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);  // For the next
 		while(epc_i2c_is_busy(buses[idx]));
 
-								raspi_tx.timestamps[6] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
-								raspi_tx.timestamps[7] = timer_10k;
 		LED_OFF();
 
 
@@ -1762,9 +1826,7 @@ void epc_test()
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);  // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
-								raspi_tx.timestamps[8] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
-								raspi_tx.timestamps[9] = timer_10k;
 		LED_OFF();
 
 
@@ -1803,9 +1865,7 @@ void epc_test()
 		while(epc_i2c_is_busy(buses[idx]));
 
 
-								raspi_tx.timestamps[10] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
-								raspi_tx.timestamps[11] = timer_10k;
 
 		LED_OFF();
 
@@ -1845,9 +1905,7 @@ void epc_test()
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
-								raspi_tx.timestamps[12] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
-								raspi_tx.timestamps[13] = timer_10k;
 
 		LED_OFF();
 
@@ -1882,9 +1940,7 @@ void epc_test()
 
 
 
-								raspi_tx.timestamps[14] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
-								raspi_tx.timestamps[15] = timer_10k;
 
 		LED_OFF();
 
@@ -1914,12 +1970,11 @@ void epc_test()
 		if(raspi_rx[4] == 8) memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
 #endif
 
-								raspi_tx.timestamps[16] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
-								raspi_tx.timestamps[17] = timer_10k;
 
 		LED_OFF();
 
+								raspi_tx.timestamps[1] = timer_10k;
 
 
 
@@ -1928,7 +1983,6 @@ void epc_test()
 		// Calculate the last measurement:
 		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1], 1);
 
-								raspi_tx.timestamps[18] = timer_10k;
 
 #ifdef SEND_EXTRA
 		if(raspi_rx[4] == 9)  memcpy(raspi_tx.dbg, &actual_ampl[2*EPC_XS*EPC_YS], 1*160*60);
@@ -1970,6 +2024,7 @@ void epc_test()
 
 		}
 
+								raspi_tx.timestamps[2] = timer_10k;
 
 		raspi_tx.status = 255;
 
