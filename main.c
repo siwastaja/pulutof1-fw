@@ -631,12 +631,6 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 			ampl = 255;
 			dist = 0;
 		}
-		else if((in->dcs[0].img[i]&1) || (in->dcs[1].img[i]&1) ||
-		   (in->dcs[2].img[i]&1) || (in->dcs[3].img[i]&1))
-		{
-			ampl = 255;
-			dist = 0;
-		}
 		else
 		{
 			int16_t dcs31 = dcs3-dcs1;
@@ -768,7 +762,7 @@ void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int thres
 			int16_t dcs0 = ((in->dcs[0].img[i]&0b0011111111111100)>>2)-2048;
 			int16_t dcs1 = ((in->dcs[1].img[i]&0b0011111111111100)>>2)-2048;
 
-			if((in->dcs[0].img[i]&1) || (in->dcs[1].img[i]&1) || dcs0 < -2047 || dcs0 > 2046 || dcs1 < -2047 || dcs1 > 2046)
+			if(dcs0 < -2047 || dcs0 > 2046 || dcs1 < -2047 || dcs1 > 2046)
 			{
 				// Overexp - it's ok, probably not too far.
 			}
@@ -847,8 +841,7 @@ void calc_interference_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int
 			int16_t dcs0 = ((in->dcs[0].img[yy*EPC_XS+xx]&0b0011111111111100)>>2)-2048;
 			int16_t dcs1 = ((in->dcs[1].img[yy*EPC_XS+xx]&0b0011111111111100)>>2)-2048;
 
-			if( (in->dcs[0].img[yy*EPC_XS+xx]&1) || (in->dcs[1].img[yy*EPC_XS+xx]&1) ||
-			    dcs0 < -1*threshold || dcs0 > threshold || dcs1 < -1*threshold || dcs1 > threshold)
+			if( dcs0 < -1*threshold || dcs0 > threshold || dcs1 < -1*threshold || dcs1 > threshold)
 			{
 				ignore_out[yy*EPC_XS+xx] = 1;
 			}
@@ -1133,6 +1126,13 @@ void top_init()
 	{
 
 		{
+			epc_wrbuf[0] = 0xcc; // tcmi polarity settings
+			epc_wrbuf[1] = 1<<0 /*dclk rising edge*/ | 1<<7 /*saturate data*/; // EPC datasheet errata: bit 0 actually defaults to 1!
+			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+			while(epc_i2c_is_busy(buses[idx]));
+		}
+
+		{
 			epc_wrbuf[0] = 0x89; 
 			epc_wrbuf[1] = (2 /*TCMI clock div 2..16, default 4*/ -1) | 0<<7 /*add clock delay?*/;
 			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
@@ -1159,15 +1159,7 @@ void top_init()
 			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 			while(epc_i2c_is_busy(buses[idx]));
 		}
-
-	/*
-		{
-			epc_wrbuf[0] = 0xcc; // tcmi polarity settings
-			epc_wrbuf[1] = 1<<7; //saturate data;
-			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
-			while(epc_i2c_is_busy(buses[idx]));
-		}
-	*/
+	
 	}
 
 	EPCLEDV_ON();
@@ -1211,9 +1203,7 @@ void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, i
 			int16_t dcs2 = ((in->dcs[2].img[i]&0b0011111111111100)>>2)-2048;
 			int16_t dcs3 = ((in->dcs[3].img[i]&0b0011111111111100)>>2)-2048;
 
-			if((in->dcs[0].img[i]&1) || (in->dcs[1].img[i]&1) ||
-			   (in->dcs[2].img[i]&1) || (in->dcs[3].img[i]&1) ||
-			   dcs0 < -1800 || dcs0 > 1800 || dcs1 < -1800 || dcs1 > 1800 || dcs2 < -1800 || dcs2 > 1800 || dcs3 < -1800 || dcs3 > 1800)
+			if(dcs0 < -1800 || dcs0 > 1800 || dcs1 < -1800 || dcs1 > 1800 || dcs2 < -1800 || dcs2 > 1800 || dcs3 < -1800 || dcs3 > 1800)
 			{
 				overexps++;
 			}
@@ -1582,6 +1572,10 @@ Conclusion: >15 is the only place that can be optimized (tof_calc_dist_ampl, whi
 	tof_calc_dist_ampl takes up to 11.5ms (moving the camera trying to find maximum)
 
 	-> try optimizing it a bit
+
+	EPC is configured to saturate the data, so that we don't need to look at the saturation flags anymore:
+
+	Down to about 11.1ms
 
 
 
