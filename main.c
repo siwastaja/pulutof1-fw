@@ -1,4 +1,4 @@
-//#define SEND_EXTRA
+#define SEND_EXTRA
 
 #include <stdint.h>
 #include <string.h>
@@ -1569,6 +1569,20 @@ Time deltas to:
 
 	Moving timestamps to polls to find bottlenecks
 
+Frame read ok, timing:
+0:0.9 1:5.3 2:7.0 3:10.0 4:11.5 5:18.2 6:18.7 7:21.9 8:22.5 9:37.7 10:40.3 11:49.4 12:52.3 13:57.8 14:69.7 15:69.7 16:81.4 17:82.8 18:0.0 19:0.0 20:0.0 21:148.4 22:480.8 23:827.0 
+Time deltas to:
+>1:4.4 >2:1.7 >3:3.0 >4:1.5 >5:6.7 >6:0.5 >7:3.2 >8:0.6 >9:15.2 >10:2.6 >11:9.1 >12:2.9 >13:5.5 >14:11.9 >15:0.0 >16:11.7 >17:1.4 
+   """           """           """           """           """"             """             """              """              """
+
+
+Conclusion: >15 is the only place that can be optimized (tof_calc_dist_ampl, while the mid-length exposure is being taken. The potential is only a few ms.)
+
+
+	tof_calc_dist_ampl takes up to 11.5ms (moving the camera trying to find maximum)
+
+	-> try optimizing it a bit
+
 
 
 */
@@ -1606,7 +1620,7 @@ void epc_test()
 			Purpose: to find other HF AC sources or other interferences to be ignored
 		*/
 
-								raspi_tx.timestamps[0] = timer_10k;
+//								raspi_tx.timestamps[0] = timer_10k;
 		epc_clk_div(idx, 3);
 		while(epc_i2c_is_busy(buses[idx]));
 
@@ -1620,18 +1634,16 @@ void epc_test()
 		while(epc_i2c_is_busy(buses[idx]));
 		;
 
-								raspi_tx.timestamps[1] = timer_10k;
-
 
 		dcmi_start_dma(&dcsa, SIZEOF_2DCS);
 		trig(idx);
 		LED_ON();
 		epc_intlen(idx, 24, 200);      // FOR THE NEXT, SEE BELOW
 		while(epc_i2c_is_busy(buses[idx]));
+								raspi_tx.timestamps[0] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
+								raspi_tx.timestamps[1] = timer_10k;
 		LED_OFF();
-
-								raspi_tx.timestamps[2] = timer_10k;
 
 
 		/*
@@ -1648,7 +1660,6 @@ void epc_test()
 		trig(idx);
 		LED_ON();
 
-								raspi_tx.timestamps[3] = timer_10k;
 
 		// Calculate the previous
 		calc_interference_ignore_from_2dcs(ignore, &dcsa, 60);
@@ -1663,14 +1674,11 @@ void epc_test()
 		while(epc_i2c_is_busy(buses[idx]));
 
 
-								raspi_tx.timestamps[4] = timer_10k;
-
-
+								raspi_tx.timestamps[2] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
+								raspi_tx.timestamps[3] = timer_10k;
 		LED_OFF();
 
-
-								raspi_tx.timestamps[5] = timer_10k;
 
 
 
@@ -1699,11 +1707,11 @@ void epc_test()
 		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 #endif
 
+								raspi_tx.timestamps[4] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
+								raspi_tx.timestamps[5] = timer_10k;
 		LED_OFF();
 
-
-								raspi_tx.timestamps[6] = timer_10k;
 
 
 		/*
@@ -1730,12 +1738,11 @@ void epc_test()
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);  // For the next
 		while(epc_i2c_is_busy(buses[idx]));
 
-
+								raspi_tx.timestamps[6] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
+								raspi_tx.timestamps[7] = timer_10k;
 		LED_OFF();
 
-
-								raspi_tx.timestamps[7] = timer_10k;
 
 
 
@@ -1761,12 +1768,11 @@ void epc_test()
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);  // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
-
+								raspi_tx.timestamps[8] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
+								raspi_tx.timestamps[9] = timer_10k;
 		LED_OFF();
 
-
-								raspi_tx.timestamps[8] = timer_10k;
 
 
 
@@ -1787,8 +1793,6 @@ void epc_test()
 		LED_ON();
 
 
-								raspi_tx.timestamps[9] = timer_10k;
-
 
 		// Calculate the previous
 		// We don't need fancy HDR combining here, since both exposures simply update the ignore list.
@@ -1804,14 +1808,13 @@ void epc_test()
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
+
 								raspi_tx.timestamps[10] = timer_10k;
-
-
 		if(poll_capt_with_timeout()) continue;
+								raspi_tx.timestamps[11] = timer_10k;
+
 		LED_OFF();
 
-
-								raspi_tx.timestamps[11] = timer_10k;
 
 
 
@@ -1848,10 +1851,11 @@ void epc_test()
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
-		if(poll_capt_with_timeout()) continue;
-		LED_OFF();
-
 								raspi_tx.timestamps[12] = timer_10k;
+		if(poll_capt_with_timeout()) continue;
+								raspi_tx.timestamps[13] = timer_10k;
+
+		LED_OFF();
 
 
 
@@ -1870,8 +1874,6 @@ void epc_test()
 		LED_ON();
 
 
-								raspi_tx.timestamps[13] = timer_10k;
-
 
 		// Calculate the previous
 		tof_calc_dist_ampl(&actual_ampl[0], &actual_dist[0], &dcsa, settings.offsets[idx][1], 1);
@@ -1885,16 +1887,13 @@ void epc_test()
 		while(epc_i2c_is_busy(buses[idx]));
 
 
+
 								raspi_tx.timestamps[14] = timer_10k;
-
-
-
 		if(poll_capt_with_timeout()) continue;
+								raspi_tx.timestamps[15] = timer_10k;
+
 		LED_OFF();
 
-
-
-								raspi_tx.timestamps[15] = timer_10k;
 
 
 		raspi_tx.status = 20;
@@ -1921,23 +1920,27 @@ void epc_test()
 		if(raspi_rx[4] == 8) memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
 #endif
 
+								raspi_tx.timestamps[16] = timer_10k;
 		if(poll_capt_with_timeout()) continue;
+								raspi_tx.timestamps[17] = timer_10k;
+
 		LED_OFF();
 
 
-								raspi_tx.timestamps[16] = timer_10k;
 
 
 		// All captures done.
 
 		// Calculate the last measurement:
 		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1], 1);
+
+								raspi_tx.timestamps[18] = timer_10k;
+
 #ifdef SEND_EXTRA
 		if(raspi_rx[4] == 9)  memcpy(raspi_tx.dbg, &actual_ampl[2*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 10) memcpy(raspi_tx.dbg, &actual_dist[2*EPC_XS*EPC_YS], 2*160*60);
 #endif
 
-								raspi_tx.timestamps[17] = timer_10k;
 
 		uint16_t stray_ampl, stray_dist, outstray_n, outstray_ampl;
 
@@ -1949,7 +1952,6 @@ void epc_test()
 
 		raspi_tx.dbg_i32[2] = outstray_ampl;
 		raspi_tx.dbg_i32[3] = outstray_n;
-								raspi_tx.timestamps[18] = timer_10k;
 
 
 		// Then combine everything:
@@ -1975,7 +1977,6 @@ void epc_test()
 		}
 
 
-								raspi_tx.timestamps[19] = timer_10k;
 		raspi_tx.status = 255;
 
 #ifdef SEND_EXTRA
