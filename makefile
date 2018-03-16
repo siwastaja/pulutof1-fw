@@ -31,7 +31,7 @@ main.bin: $(OBJ)
 
 fr: main.bin
 #	scp main_full.bin hrst@192.168.130.149:~/main_full.bin
-	scp main_full.bin hrst@192.168.1.3:~/main_full.bin
+	scp main_full.bin hrst@192.168.1.5:~/main_full.bin
 
 flash_full: main.bin
 	stm32sprog -b 115200 -vw main_full.bin

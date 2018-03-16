@@ -745,6 +745,31 @@ void epc_4dcs(int idx) // OK to do while acquiring: shadow registered: applied t
 	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 }
 
+
+void epc_4dcs_dualint(int idx) // OK to do while acquiring: shadow registered: applied to next trigger.
+{
+	epc_wrbuf[0] = 0x92;
+	epc_wrbuf[1] = 0b00111100;
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+}
+
+// Required for dual integration time or dual phase mode:
+void epc_dualphase_or_int(int idx) // OK to do while acquiring: shadow registered: applied to next trigger.
+{
+	epc_wrbuf[0] = 0x94;
+	epc_wrbuf[1] = 0x80;
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+}
+
+// Back to normal mode (non-dual int.time or non-dual phase)
+void epc_normalphase_or_int(int idx) // OK to do while acquiring: shadow registered: applied to next trigger.
+{
+	epc_wrbuf[0] = 0x94;
+	epc_wrbuf[1] = 0x80;
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+}
+
+
 void epc_intlen(int idx, uint8_t multiplier, uint16_t time) // OK to do while acquiring: shadow registered: applied to next trigger.
 {
 	int intlen = ((int)time<<2)-1;
@@ -755,6 +780,24 @@ void epc_intlen(int idx, uint8_t multiplier, uint16_t time) // OK to do while ac
 
 	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 4);
 }
+
+// time1 = odd rows, time2 = even rows
+// epc_4dcs_dualint() and epc_dualphase_or_int() must be called first
+void epc_intlen_dual(int idx, uint8_t multiplier, uint16_t time1, uint16_t time2) // OK to do while acquiring: shadow registered: applied to next trigger.
+{
+	int intlen1 = ((int)time1<<2)-1;
+	int intlen2 = ((int)time2<<2)-1;
+	epc_wrbuf[0] = 0x9E;
+	epc_wrbuf[1] = (intlen2&0xff00)>>8;
+	epc_wrbuf[2] = intlen2&0xff;
+	epc_wrbuf[3] = 0;
+	epc_wrbuf[4] = multiplier;
+	epc_wrbuf[5] = (intlen1&0xff00)>>8;
+	epc_wrbuf[6] = intlen1&0xff;
+
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 7);
+}
+
 
 void calc_toofar_ignore_from_2dcs(uint8_t *ignore_out, epc_4dcs_t *in, int threshold /*mm*/, int offset_mm, int clk_div)
 {
@@ -959,14 +1002,21 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 #define STRAY_CORR_LEVEL 2000 // smaller -> more correction
 #define STRAY_BLANKING_LVL 40 // smaller -> more easily ignored
 
-void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore_in, uint16_t stray_ampl, uint16_t stray_dist)
+/*
+	ampl and dist are expected to contain 2*EPC_XS*EPC_YS elements.
+	The first 1*EPC_XS*EPC_YS is a dual int mode set, even lines at shortest integration, odd lines at mid integration
+	The second is a single full image.
+*/
+void tof_calc_dist_3hdr_dualint_and_normal_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore_in, uint16_t stray_ampl, uint16_t stray_dist)
 {
 	int stray_ignore = stray_ampl/STRAY_BLANKING_LVL;
 	for(int yy=0; yy < EPC_YS; yy++)
 	{
 		for(int xx=0; xx < EPC_XS; xx++)
 		{
-			int pxidx = yy*EPC_XS+xx;
+			int pxidx          = yy*EPC_XS+xx;
+			int pxidx_shortint = (yy&(~1UL))*EPC_XS+xx;
+			int pxidx_midint   = (yy | 1UL) *EPC_XS+xx;
 			if(     // On ignore list: either directly, or on any 8 neighbors.
 				ignore_in[pxidx] ||
 				( yy>0        &&    ( ignore_in[(yy-1)*EPC_XS+xx] || (xx>0 && ignore_in[(yy-1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore_in[(yy-1)*EPC_XS+xx+1]) ) ) ||
@@ -977,23 +1027,23 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 			{
 				dist_out[pxidx] = 0;
 			}
-			else if(ampl[0*EPC_XS*EPC_YS+pxidx] == 255) // Shortest exposure overexposed
+			else if(ampl[0*EPC_XS*EPC_YS+pxidx_shortint] == 255) // Shortest exposure overexposed
 			{
 				dist_out[pxidx] = 1;
 			}
 			else
 			{
-				int32_t suit0 = ampl_suitability[ampl[0*EPC_XS*EPC_YS+pxidx]];
-				int32_t suit1 = ampl_suitability[ampl[1*EPC_XS*EPC_YS+pxidx]];
-				int32_t suit2 = ampl_suitability[ampl[2*EPC_XS*EPC_YS+pxidx]];
+				int32_t suit0 = ampl_suitability[ampl[0*EPC_XS*EPC_YS+pxidx_shortint]];
+				int32_t suit1 = ampl_suitability[ampl[0*EPC_XS*EPC_YS+pxidx_midint]];
+				int32_t suit2 = ampl_suitability[ampl[1*EPC_XS*EPC_YS+pxidx]];
 
-				int32_t dist0 = dist[0*EPC_XS*EPC_YS+pxidx];
-				int32_t dist1 = dist[1*EPC_XS*EPC_YS+pxidx];
-				int32_t dist2 = dist[2*EPC_XS*EPC_YS+pxidx];
+				int32_t dist0 = dist[0*EPC_XS*EPC_YS+pxidx_shortint];
+				int32_t dist1 = dist[0*EPC_XS*EPC_YS+pxidx_midint];
+				int32_t dist2 = dist[1*EPC_XS*EPC_YS+pxidx];
 
-				int32_t ampl0 = ampl[0*EPC_XS*EPC_YS+pxidx]*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER;
-				int32_t ampl1 = ampl[1*EPC_XS*EPC_YS+pxidx]*HDR_EXP_MULTIPLIER;
-				int32_t ampl2 = ampl[2*EPC_XS*EPC_YS+pxidx];
+				int32_t ampl0 = ampl[0*EPC_XS*EPC_YS+pxidx_shortint]*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER;
+				int32_t ampl1 = ampl[0*EPC_XS*EPC_YS+pxidx_midint]*HDR_EXP_MULTIPLIER;
+				int32_t ampl2 = ampl[1*EPC_XS*EPC_YS+pxidx];
 
 				int32_t suit_sum = suit0 + suit1 + suit2;
 
@@ -1013,7 +1063,7 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 					else
 						expected_ampl = (2000*stray_ignore)/combined_dist;
 
-					if(corr_amount > 1000 || corr_amount < -100 || combined_ampl < expected_ampl)
+					if(corr_amount > 1000 || corr_amount < -300 || combined_ampl < expected_ampl)
 					{
 						dist_out[pxidx] = 0;
 					}
@@ -1416,6 +1466,10 @@ int run_offset_cal(uint8_t idx)
 	mid=[4, 4, 6, 8,10,13,15,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,15,13,10, 8, 6, 4, 4]
 	c=[floor(mid*6.2);floor(mid*2.5);floor(mid*2.3);floor(mid*2.0);floor(mid*1.7);floor(mid*1.5);floor(mid*1.4);floor(mid*1.3);floor(mid*1.2);floor(mid*1.1);floor(mid*1.05);floor(mid*1.0);floor(mid*0.95);floor(mid*0.9);floor(mid*0.9)]
 
+
+	This function works only on even rows. As it's usually used with the shortest HDR integration, when using dual integration mode,
+	use the shorter time on even rows.
+
 */
 
 static uint8_t stray_weight[15*40] __attribute__((section(".dtcm_data"))) =
@@ -1688,7 +1742,7 @@ void epc_test()
 		epc_select(idx);
 
 		/*
-			6.66 MHz
+			20.0 MHz
 			LEDS OFF
 			2DCS
 			Short exp
@@ -1696,7 +1750,7 @@ void epc_test()
 		*/
 
 								raspi_tx.timestamps[0] = timer_10k;
-		epc_clk_div(idx, 3);
+		epc_clk_div(idx, 1);
 		while(epc_i2c_is_busy(buses[idx]));
 
 		epc_dis_leds(idx);
@@ -1705,7 +1759,7 @@ void epc_test()
 		epc_2dcs(idx);
 		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_intlen(idx, 3, 200);
+		epc_intlen(idx, 8, 200);
 		while(epc_i2c_is_busy(buses[idx]));
 		;
 
@@ -1713,20 +1767,20 @@ void epc_test()
 		dcmi_start_dma(&dcsa, SIZEOF_2DCS);
 		trig(idx);
 		LED_ON();
-		epc_intlen(idx, 8, 200);      // FOR THE NEXT, SEE BELOW
+		epc_intlen(idx, 3, 200);      // FOR THE NEXT, SEE BELOW
 		while(epc_i2c_is_busy(buses[idx]));
 		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 
 		/*
-			20 MHz
+			6.66 MHz
 			LEDS OFF
 			2DCS
 			Short exp
 			Purpose: Same as the previous, at different freq
 		*/
-		epc_clk_div(idx, 1);
+		epc_clk_div(idx, 3);
 		while(epc_i2c_is_busy(buses[idx]));
 
 		dcmi_start_dma(&dcsb, SIZEOF_2DCS);
@@ -1741,7 +1795,7 @@ void epc_test()
 		if(raspi_rx[4] == 1) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 #endif
 
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*2/3);  // For the next
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER/2);  // For the next
 		while(epc_i2c_is_busy(buses[idx]));
 
 		if(poll_capt_with_timeout()) continue;
@@ -1760,9 +1814,6 @@ void epc_test()
 			Long exp
 			Purpose: Long-distance approximate readings for ignoring too-far points.
 		*/
-
-		epc_clk_div(idx, 3);
-		while(epc_i2c_is_busy(buses[idx]));
 
 		epc_ena_leds(idx);
 		while(epc_i2c_is_busy(buses[idx]));
@@ -1803,42 +1854,41 @@ void epc_test()
 		// Calculate the previous
 		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 5500, settings.offsets[idx][3], 3);
 
-		epc_4dcs(idx); // for the next
+		epc_4dcs_dualint(idx); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION); // for the next
+		epc_dualphase_or_int(idx); // for the next
+		while(epc_i2c_is_busy(buses[idx]));
+
+		epc_intlen_dual(idx, 8, /*odd rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER, /*even rows:*/ SHORTEST_INTEGRATION); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
 		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
 
-
 		/*
 			20 MHz (wrap at 7.5m)
 			LEDS ON
 			4DCS
-			Short exp
+			Short exp, Mid exp in dual integration mode
 			Purpose: The real thing starts here! Shortest of the three HDR aqcuisition. Shortest first, because
 			it'll include the closest objects, and the closest are likely to move most during the
 			whole process -> minimize their motion blur, i.e., the ignore list is fairly recent now.
 		*/
 
-
-		static uint8_t  actual_ampl[3*EPC_XS*EPC_YS];
-		static uint16_t actual_dist[3*EPC_XS*EPC_YS];
-
+		static uint8_t  actual_ampl[2*EPC_XS*EPC_YS];
+		static uint16_t actual_dist[2*EPC_XS*EPC_YS];
 
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
 		trig(idx);
 		LED_ON();
 
-
 #ifdef SEND_EXTRA
 		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, mono_comp.img, sizeof(ignore));
 #endif
 
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
 		if(poll_capt_with_timeout()) continue;
@@ -1852,7 +1902,7 @@ void epc_test()
 			20 MHz (wrap at 7.5m)
 			LEDS ON
 			4DCS
-			Mid exp
+			Long exp
 			Purpose: The real thing continues.
 		*/
 
@@ -1864,6 +1914,7 @@ void epc_test()
 
 
 		// Calculate the previous
+		// tof_calc_dist_ampl works with the dual-integration data as well, it processes pixel-by-pixel
 		tof_calc_dist_ampl(&actual_ampl[0], &actual_dist[0], &dcsa, settings.offsets[idx][1], 1);
 
 #ifdef SEND_EXTRA
@@ -1883,43 +1934,18 @@ void epc_test()
 		raspi_tx.status = 20;
 
 
-
-		/*
-			20 MHz (wrap at 7.5m)
-			LEDS ON
-			4DCS
-			Long exp
-			Purpose: The real thing continues.
-		*/
-
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
-
-
-		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
-		trig(idx);
-		LED_ON();
-
-		// Calculate the previous
-		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[idx][1], 1);
-
 #ifdef SEND_EXTRA
 		if(raspi_rx[4] == 7) memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 8) memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
 #endif
 
-		if(poll_capt_with_timeout()) continue;
-
-		LED_OFF();
-
 								raspi_tx.timestamps[1] = timer_10k;
-
 
 
 		// All captures done.
 
 		// Calculate the last measurement:
-		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1], 1);
+		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1], 1);
 
 
 #ifdef SEND_EXTRA
@@ -1931,7 +1957,7 @@ void epc_test()
 		uint16_t stray_ampl, stray_dist, outstray_n, outstray_ampl;
 
 		calc_stray_estimate(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &stray_ampl, &stray_dist);
-		outstray_n = calc_outside_stray_estimate(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &outstray_ampl);
+		outstray_n = calc_outside_stray_estimate(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &outstray_ampl);
 
 		raspi_tx.dbg_i32[0] = stray_ampl;
 		raspi_tx.dbg_i32[1] = stray_dist;
@@ -1958,7 +1984,7 @@ void epc_test()
 				combined_stray_dist = stray_dist;
 			}
 
-			tof_calc_dist_3hdr_with_ignore_with_straycomp(raspi_tx.depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
+			tof_calc_dist_3hdr_dualint_and_normal_with_ignore_with_straycomp(raspi_tx.depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
 
 		}
 
