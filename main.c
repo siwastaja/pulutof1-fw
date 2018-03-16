@@ -954,7 +954,7 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 }
 
 #define SHORTEST_INTEGRATION 125
-#define HDR_EXP_MULTIPLIER 5 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
+#define HDR_EXP_MULTIPLIER 6 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
 
 #define STRAY_CORR_LEVEL 2000 // smaller -> more correction
 #define STRAY_BLANKING_LVL 40 // smaller -> more easily ignored
@@ -1650,6 +1650,15 @@ Conclusion: >15 is the only place that can be optimized (tof_calc_dist_ampl, whi
 
 	Upgrading the sequencer took from 79.8ms to 79.5ms
 
+0:0.1 1:79.6 2:93.0
+	--> new, shorter sequence:
+0:0.0 1:53.1 2:64.3
+
+	--> could make the actual exposure longer
+	(was considering an additional 10MHz set, because lower freq gives more usable LED power, but it makes more sense to just extend the existing exposure)
+
+0:0.1 1:58.0 2:73.5
+
 
 */
 
@@ -1696,7 +1705,7 @@ void epc_test()
 		epc_2dcs(idx);
 		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_intlen(idx, 8, 200);
+		epc_intlen(idx, 3, 200);
 		while(epc_i2c_is_busy(buses[idx]));
 		;
 
@@ -1704,7 +1713,7 @@ void epc_test()
 		dcmi_start_dma(&dcsa, SIZEOF_2DCS);
 		trig(idx);
 		LED_ON();
-		epc_intlen(idx, 24, 200);      // FOR THE NEXT, SEE BELOW
+		epc_intlen(idx, 8, 200);      // FOR THE NEXT, SEE BELOW
 		while(epc_i2c_is_busy(buses[idx]));
 		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
@@ -1732,10 +1741,7 @@ void epc_test()
 		if(raspi_rx[4] == 1) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 #endif
 
-		epc_2dcs(idx); // For the next
-		while(epc_i2c_is_busy(buses[idx]));
-
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*3/2);  // For the next
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER*2/3);  // For the next
 		while(epc_i2c_is_busy(buses[idx]));
 
 		if(poll_capt_with_timeout()) continue;
@@ -1829,7 +1835,7 @@ void epc_test()
 
 
 #ifdef SEND_EXTRA
-		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, mono_comp, sizeof(ignore));
+		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, mono_comp.img, sizeof(ignore));
 #endif
 
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
