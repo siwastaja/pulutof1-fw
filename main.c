@@ -1,4 +1,4 @@
-#define SEND_EXTRA
+//#define SEND_EXTRA
 #define FAST_APPROX_AMPLITUDE
 //#define DUALINT // If defined, two shortest exposures are taken in half-resolution dual integration time HDR mode.
 
@@ -1355,15 +1355,15 @@ void top_init()
 
 
 	epc01_i2c_init();
-//	epc23_i2c_init();
+	epc23_i2c_init();
 
 	/*
 		Even with 40cm cable, 40MHz (div 2) works well!
 
 	*/
 
-//	for(int idx = 0; idx < N_SENSORS; idx++)
-	for(int idx = 0; idx < 1; idx++)
+	for(int idx = 0; idx < N_SENSORS; idx++)
+//	for(int idx = 0; idx < 1; idx++)
 	{
 		delay_ms(10);
 
@@ -1958,7 +1958,7 @@ Conclusion: >15 is the only place that can be optimized (tof_calc_dist_ampl, whi
 
 */
 
-void epc_test()
+void epc_run()
 {
 	int idx = 0;
 	int cnt = 0;
@@ -1978,7 +1978,7 @@ void epc_test()
 
 		timer_10k = 0;
 
-		raspi_tx.status = 30;
+		raspi_tx.status = 60;
 
 		memset(ignore, 0, sizeof(ignore));
 		epc_select(idx);
@@ -2181,6 +2181,7 @@ void epc_test()
 
 		if(poll_capt_with_timeout()) continue;
 
+		raspi_tx.status = 35;
 
 		LED_OFF();
 
@@ -2249,7 +2250,7 @@ void epc_test()
 
 
 
-		raspi_tx.status = 20;
+		raspi_tx.status = 15;
 
 
 								raspi_tx.timestamps[1] = timer_10k;
@@ -2299,7 +2300,7 @@ void epc_test()
 		// Then combine everything:
 		
 
-		raspi_tx.status = 5;
+		raspi_tx.status = 8;
 
 		{
 			uint16_t combined_stray_ampl, combined_stray_dist;
@@ -2326,10 +2327,10 @@ void epc_test()
 		raspi_tx.status = 255;
 
 #ifdef SEND_EXTRA
-		while(timer_10k < 6000)
+		while(timer_10k < ((idx==N_SENSORS-1)?3000:1500)) // 1.33 FPS
 #else
-//		while(timer_10k < ((idx==N_SENSORS-1)?1300:1200))
-		while(timer_10k < 3000)
+//		while(timer_10k < ((idx==N_SENSORS-1)?1500:800)) // 2.6 FPS
+		while(timer_10k < ((idx==N_SENSORS-1)?2500:800)) // 2.04 FPS
 #endif
 		{
 			if(new_rx)
@@ -2344,7 +2345,7 @@ void epc_test()
 					uint8_t sensor_idx = *((volatile uint8_t*)&raspi_rx[4]);
 					__DSB(); __ISB();
 					int ret = 999;
-					if(sensor_idx < N_SENSORS-1)
+					if(sensor_idx < N_SENSORS)
 						ret = run_offset_cal(sensor_idx);
 					raspi_tx.dbg_i32[7] = ret;
 				}
@@ -2354,8 +2355,7 @@ void epc_test()
 
 		cnt++;
 
-
-	//	idx++;
+		idx++;
 		if(idx >= N_SENSORS) idx = 0;
 	}
 
@@ -2668,7 +2668,9 @@ void main()
 	IO_SPEED(GPIOB, 14, 3); // MISO pin gets the highest speed.
 
 
-	// Initialization order from reference manual:
+
+	init_raspi_tx();
+	__DSB(); __ISB();
 
 	/*
 		STM32 TRAP WARNING:
@@ -2677,13 +2679,7 @@ void main()
 		I can't figure out any reason to use such mode, and it's the default. So remember to set this bit.
 	*/
 
-	init_raspi_tx();
-
-//	uint8_t c = 0;
-//	for(int i=0; i<160*60; i++)
-//		raspi_tx.ambient[i] = c++;
-
-	__DSB(); __ISB();
+	// Initialization order from reference manual:
 	SPI2->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/ | 1UL<<12 /*Don't Reject The Last Byte*/;
 
 	// TX DMA
@@ -2724,13 +2720,6 @@ void main()
 	NVIC_SetPriority(EXTI15_10_IRQn, 0b0101);
 	NVIC_EnableIRQ(EXTI15_10_IRQn);
 
-	/*
-		MOSI = green
-		MISO = blue
-		SCK  = violet
-		CS0  = grey
-	*/
-
 	top_init();
-	epc_test();
+	epc_run();
 }
