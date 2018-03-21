@@ -1,5 +1,6 @@
 #define SEND_EXTRA
 #define FAST_APPROX_AMPLITUDE
+//#define DUALINT // If defined, two shortest exposures are taken in half-resolution dual integration time HDR mode.
 
 #include <stdint.h>
 #include <string.h>
@@ -90,6 +91,10 @@ static const uint8_t buses[N_SENSORS] =
 static const uint8_t addrs[N_SENSORS] =
 { 0b0100000, 0b0100001, 0b0100000, 0b0100001};
 
+// Temperature sensor readout procedure is weird, and requires storing and restoring some undocumented internal registers to the chip:
+static uint8_t epc_tempsens_regx[N_SENSORS], epc_tempsens_regy[N_SENSORS];
+static float epc_tempsens_factory_offset[N_SENSORS]; // in some intermediate format, as specified in datasheet parameter "z"
+int temperatures[N_SENSORS]; // in degs/10
 
 #define DMA_STREAM(_dma_, _stream_) (_dma_ ## _Stream ## _stream_)
 
@@ -183,15 +188,17 @@ void error(int code)
 	while(1)
 	{
 		LED_ON();
-		delay_ms(40);
+		delay_ms(250);
 		LED_OFF();
-		delay_ms(40);
-		if(++i == 10)
+		delay_ms(250);
+
+		i++;
+		if(i >= code)
 		{
 			i = 0;
-			char printbuf[32];
-			uart_print_string_blocking(" E"); o_utoa32(code, printbuf); uart_print_string_blocking(printbuf); uart_print_string_blocking(" ");
+			delay_ms(1000);
 		}
+
 	}
 }
 
@@ -230,14 +237,31 @@ void epc_i2c_write_dma(uint8_t bus, uint8_t slave_addr_7b, volatile uint8_t *buf
 	// If data cache is enabled later, remember to use non-cacheable sections (or invalidate the cache)
 	__DSB(); __ISB();
 
-	if(epc_i2c_write_busy[bus] || epc_i2c_read_busy[bus])
-		error(11);
+	if(epc_i2c_write_busy[bus] || epc_i2c_read_busy[bus] || epc_i2c_read_state[bus])
+		error(5);
+
+	if(DMA1->LISR & 1UL<<0)
+		error(12);
+	if(DMA1->LISR & 1UL<<2)
+		error(13);
+	if(DMA1->LISR & 1UL<<3)
+		error(14);
 
 	if(EPC_I2C_WR_DMAS[bus]->CR & 1UL)
-		error(12);
+	{
+		if(DMA1->LISR & 1UL<<5)
+			error(15);
+
+		error(6);
+	}
 
 	epc_i2c_write_busy[bus] = 1;
 	EPC_I2CS[bus]->ICR = 1UL<<5; // Clear any pending STOPF interrupt 
+	if(bus == 0)
+		NVIC_ClearPendingIRQ(I2C3_EV_IRQn);
+	else if(bus==1)
+		NVIC_ClearPendingIRQ(I2C4_EV_IRQn);
+
 
 	if(len > 1) // Actually use DMA
 	{		
@@ -270,6 +294,10 @@ void epc_i2c_write_dma(uint8_t bus, uint8_t slave_addr_7b, volatile uint8_t *buf
 void epc_i2c_read_dma(uint8_t bus, uint8_t slave_addr_7b, volatile uint8_t *buf, uint8_t len)
 {
 	if(bus >= N_I2C) return;
+	// Pipeline flush is almost always needed when using this function, so easier to do it here.
+	// If data cache is enabled later, remember to use non-cacheable sections (or invalidate the cache)
+	__DSB(); __ISB();
+
 	EPC_I2C_RD_DMAS[bus]->CR = EPC_I2C_RD_CHANS[bus]<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 
 			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
 	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/ | 1UL<<4 /*transfer complete interrupt*/;
@@ -300,8 +328,13 @@ void epc_i2c_read_dma(uint8_t bus, uint8_t slave_addr_7b, volatile uint8_t *buf,
 void epc_i2c_read(uint8_t bus, uint8_t slave_addr_7b, uint8_t reg_addr, volatile uint8_t *buf, uint8_t len)
 {
 	if(bus >= N_I2C) return;
+
+	// Pipeline flush is almost always needed when using this function, so easier to do it here.
+	// If data cache is enabled later, remember to use non-cacheable sections (or invalidate the cache)
+	__DSB(); __ISB();
+
 	if(epc_i2c_write_busy[bus] || epc_i2c_read_busy[bus])
-		error(12);
+		error(7);
 	/*
 		Full I2C read cycle consists of a write cycle (payload = reg_addr), without stop condition,
 		then the actual read cycle starting with the repeated start condition.
@@ -358,11 +391,11 @@ void epc01_i2c_inthandler()
 		epc_i2c_read_state[0]=0;
 
 	}
-	else // STOPF interrupt - this was a write.
+	else  // STOPF interrupt - this was a write.
 	{
 		if(I2C3->ISR & (1UL<<15)) // busy shouldn't be high - at least fail instead of doing random shit
 		{
-			error(22);
+			error(8);
 		}
 
 		// Write is now finished.
@@ -379,13 +412,12 @@ void epc23_i2c_inthandler()
 		// Writing START to 1 (in epc_i2c_read_dma()) clears the interrupt flag
 		epc_i2c_read_dma(1, epc_i2c_read_slave_addr[1], epc_i2c_read_buf[1], epc_i2c_read_len[1]);
 		epc_i2c_read_state[1]=0;
-
 	}
 	else // STOPF interrupt - this was a write.
 	{
 		if(I2C4->ISR & (1UL<<15)) // busy shouldn't be high - at least fail instead of doing random shit
 		{
-			error(22);
+			error(9);
 		}
 
 		// Write is now finished.
@@ -421,9 +453,9 @@ void epc01_i2c_init()
 
 	I2C3->CR1 |= 1UL; // Enable
 
-	NVIC_SetPriority(I2C3_EV_IRQn, 0b0101);
+	NVIC_SetPriority(I2C3_EV_IRQn, 0b1010);
 	NVIC_EnableIRQ(I2C3_EV_IRQn);
-	NVIC_SetPriority(DMA1_Stream2_IRQn, 0b0101);
+	NVIC_SetPriority(DMA1_Stream2_IRQn, 0b1010);
 	NVIC_EnableIRQ(DMA1_Stream2_IRQn);
 
 }
@@ -448,9 +480,9 @@ void epc23_i2c_init()
 
 	I2C4->CR1 |= 1UL; // Enable
 
-	NVIC_SetPriority(I2C4_EV_IRQn, 0b0101);
+	NVIC_SetPriority(I2C4_EV_IRQn, 0b1010);
 	NVIC_EnableIRQ(I2C4_EV_IRQn);
-	NVIC_SetPriority(DMA1_Stream1_IRQn, 0b0101);
+	NVIC_SetPriority(DMA1_Stream1_IRQn, 0b1010);
 	NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 
 }
@@ -488,6 +520,7 @@ void epc_dcmi_dma_inthandler()
 }
 
 int poll_capt_with_timeout();
+int poll_capt_with_timeout_complete();
 
 void epc_shutdown_inthandler()
 {
@@ -685,6 +718,10 @@ void tof_calc_dist_ampl(uint8_t *ampl_out, uint16_t *dist_out, epc_4dcs_t *in, i
 				dist_i *= clk_div;
 
 				if(dist_i < 1) dist_i = 1; else if(dist_i>6000) dist_i=6000;
+//				if(dist_i < 1) dist_i += 3000; 
+//				if(dist_i < 1) dist_i = 1;
+
+				if(dist_i>6000) dist_i=6000;
 
 #ifdef FAST_APPROX_AMPLITUDE
 				ampl = (abso(dcs20)+abso(dcs31))/30; if(ampl > 255) ampl = 255;
@@ -765,7 +802,7 @@ void epc_dualphase_or_int(int idx) // OK to do while acquiring: shadow registere
 void epc_normalphase_or_int(int idx) // OK to do while acquiring: shadow registered: applied to next trigger.
 {
 	epc_wrbuf[0] = 0x94;
-	epc_wrbuf[1] = 0x80;
+	epc_wrbuf[1] = 0x00;
 	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 }
 
@@ -796,6 +833,69 @@ void epc_intlen_dual(int idx, uint8_t multiplier, uint16_t time1, uint16_t time2
 	epc_wrbuf[6] = intlen1&0xff;
 
 	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 7);
+}
+
+// Do the magic stuff specified in the datasheet to enable temperature sensor conversion:
+void epc_temperature_magic_mode(int idx)
+{
+	epc_wrbuf[0] = 0xD3;
+	epc_wrbuf[1] = epc_tempsens_regx[idx] | 0x60;
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+	while(epc_i2c_is_busy(buses[idx]));
+
+	epc_wrbuf[0] = 0xD5;
+	epc_wrbuf[1] = epc_tempsens_regy[idx] & 0x0f;
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+	while(epc_i2c_is_busy(buses[idx]));
+}
+
+
+// Do the magic stuff specified in the datasheet to disable temperature sensor conversion, back to normal operation
+void epc_temperature_magic_mode_off(int idx)
+{
+	epc_wrbuf[0] = 0xD3;
+	epc_wrbuf[1] = epc_tempsens_regx[idx];
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+	while(epc_i2c_is_busy(buses[idx]));
+
+	epc_wrbuf[0] = 0xD5;
+	epc_wrbuf[1] = epc_tempsens_regy[idx];
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+	while(epc_i2c_is_busy(buses[idx]));
+}
+
+uint16_t epc_read_temperature_regs(int idx)
+{
+	uint8_t hi, lo;
+	epc_i2c_read(buses[idx], addrs[idx], 0x60, &hi, 1);
+	while(epc_i2c_is_busy(buses[idx]));
+	epc_i2c_read(buses[idx], addrs[idx], 0x61, &lo, 1);
+	while(epc_i2c_is_busy(buses[idx]));
+
+	delay_us(50); // see the comment about i2c read bug in top_init
+
+	return ((uint16_t)hi<<8) | ((uint16_t)lo);
+}
+
+
+void epc_fix_modulation_table_defaults(int idx)
+{
+	epc_wrbuf[0] = 0x22;
+	epc_wrbuf[1] = 0x30;
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+	while(epc_i2c_is_busy(buses[idx]));
+	epc_wrbuf[0] = 0x25;
+	epc_wrbuf[1] = 0x35;
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+	while(epc_i2c_is_busy(buses[idx]));
+	epc_wrbuf[0] = 0x28;
+	epc_wrbuf[1] = 0x3A;
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+	while(epc_i2c_is_busy(buses[idx]));
+	epc_wrbuf[0] = 0x2B;
+	epc_wrbuf[1] = 0x3F;
+	epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
+	while(epc_i2c_is_busy(buses[idx]));
 }
 
 
@@ -996,11 +1096,97 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 	}
 }
 
-#define SHORTEST_INTEGRATION 125
+#define SHORTEST_INTEGRATION 100
 #define HDR_EXP_MULTIPLIER 6 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
 
 #define STRAY_CORR_LEVEL 2000 // smaller -> more correction
 #define STRAY_BLANKING_LVL 40 // smaller -> more easily ignored
+
+
+/*
+	ampl and dist are expected to contain 3*EPC_XS*EPC_YS elements: three images at different exposures that vary by HDR_EXP_MULTIPLIER
+*/
+void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore_in, uint16_t stray_ampl, uint16_t stray_dist)
+{
+	int stray_ignore = stray_ampl/STRAY_BLANKING_LVL;
+	if(stray_ignore < 2) stray_ignore = 2;
+	for(int yy=0; yy < EPC_YS; yy++)
+	{
+		for(int xx=0; xx < EPC_XS; xx++)
+		{
+			int pxidx          = yy*EPC_XS+xx;
+			if(     // On ignore list: either directly, or on any 8 neighbors.
+				ignore_in[pxidx] ||
+				( yy>0        &&    ( ignore_in[(yy-1)*EPC_XS+xx] || (xx>0 && ignore_in[(yy-1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore_in[(yy-1)*EPC_XS+xx+1]) ) ) ||
+				( yy<EPC_YS-1 &&    ( ignore_in[(yy+1)*EPC_XS+xx] || (xx>0 && ignore_in[(yy+1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore_in[(yy+1)*EPC_XS+xx+1]) ) ) ||
+				( xx>0        &&    ignore_in[yy*EPC_XS+xx-1] ) ||
+				( xx<EPC_XS-1 &&    ignore_in[yy*EPC_XS+xx+1] )
+			  )
+			{
+				dist_out[pxidx] = 0;
+			}
+			else if(ampl[0*EPC_XS*EPC_YS+pxidx] == 255) // Shortest exposure overexposed
+			{
+				dist_out[pxidx] = 3;
+			}
+			else
+			{
+				int32_t suit0 = ampl_suitability[ampl[0*EPC_XS*EPC_YS+pxidx]];
+				int32_t suit1 = ampl_suitability[ampl[1*EPC_XS*EPC_YS+pxidx]];
+				int32_t suit2 = ampl_suitability[ampl[2*EPC_XS*EPC_YS+pxidx]];
+
+				int32_t dist0 = dist[0*EPC_XS*EPC_YS+pxidx];
+				int32_t dist1 = dist[1*EPC_XS*EPC_YS+pxidx];
+				int32_t dist2 = dist[2*EPC_XS*EPC_YS+pxidx];
+
+				int32_t ampl0 = ampl[0*EPC_XS*EPC_YS+pxidx]*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER;
+				int32_t ampl1 = ampl[1*EPC_XS*EPC_YS+pxidx]*HDR_EXP_MULTIPLIER;
+				int32_t ampl2 = ampl[2*EPC_XS*EPC_YS+pxidx];
+
+				int32_t suit_sum = suit0 + suit1 + suit2;
+
+				if(suit_sum < 10)
+					dist_out[pxidx] = 0;
+				else
+				{
+					int32_t combined_ampl = (ampl0*suit0 + ampl1*suit1 + ampl2*suit2)/suit_sum;
+					int32_t combined_dist = (dist0*suit0 + dist1*suit1 + dist2*suit2)/suit_sum;
+
+					int32_t corr_amount = ((16*(int32_t)stray_ampl)/(int32_t)combined_ampl);
+
+					// Expect higher amplitude from "close" pixels. If the amplitude is low, they are artefacts most likely.
+					int32_t expected_ampl;
+					if(combined_dist > 2000)
+						expected_ampl = stray_ignore;
+					else
+						expected_ampl = (2000*stray_ignore)/combined_dist;
+
+					if(corr_amount > 1000 || corr_amount < -300 || combined_ampl < expected_ampl)
+					{
+						dist_out[pxidx] = 0;
+					}
+					else
+					{
+						combined_dist -= stray_dist;
+
+						combined_dist *= STRAY_CORR_LEVEL + corr_amount;
+						combined_dist /= STRAY_CORR_LEVEL;
+
+						combined_dist += stray_dist;
+
+						if(combined_dist < 1) combined_dist = 1;
+						else if(combined_dist > 6000) combined_dist = 6000;
+
+						dist_out[pxidx] = combined_dist;
+					}
+				}				
+
+			}
+
+		}
+	}
+}
+
 
 /*
 	ampl and dist are expected to contain 2*EPC_XS*EPC_YS elements.
@@ -1010,6 +1196,7 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 void tof_calc_dist_3hdr_dualint_and_normal_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore_in, uint16_t stray_ampl, uint16_t stray_dist)
 {
 	int stray_ignore = stray_ampl/STRAY_BLANKING_LVL;
+	if(stray_ignore < 2) stray_ignore = 2;
 	for(int yy=0; yy < EPC_YS; yy++)
 	{
 		for(int xx=0; xx < EPC_XS; xx++)
@@ -1029,7 +1216,7 @@ void tof_calc_dist_3hdr_dualint_and_normal_with_ignore_with_straycomp(uint16_t* 
 			}
 			else if(ampl[0*EPC_XS*EPC_YS+pxidx_shortint] == 255) // Shortest exposure overexposed
 			{
-				dist_out[pxidx] = 1;
+				dist_out[pxidx] = 3;
 			}
 			else
 			{
@@ -1109,8 +1296,6 @@ void process_dcs(uint8_t *out, epc_img_t *in)
 	}
 }
 
-#define SEND_EXTRA
-
 typedef struct __attribute__((packed)) __attribute__((aligned(4)))
 {
 	uint32_t header;
@@ -1168,7 +1353,6 @@ void top_init()
 	EPC23_RSTN_HIGH();
 	delay_ms(300);
 
-	// TODO: yes
 
 	epc01_i2c_init();
 //	epc23_i2c_init();
@@ -1207,12 +1391,44 @@ void top_init()
 			while(epc_i2c_is_busy(buses[idx]));
 		}
 
+
+// Temperature sensor readout procedure is weird, and requires storing and restoring some undocumented internal registers to the chip:
+
+		{
+
+			epc_i2c_read(buses[idx], addrs[idx], 0xd3, &epc_tempsens_regx[idx], 1);
+			while(epc_i2c_is_busy(buses[idx]));
+
+			epc_i2c_read(buses[idx], addrs[idx], 0xd5, &epc_tempsens_regy[idx], 1);
+			while(epc_i2c_is_busy(buses[idx]));
+
+			uint8_t temp_offset;
+			epc_i2c_read(buses[idx], addrs[idx], 0xe8, &temp_offset, 1);
+			while(epc_i2c_is_busy(buses[idx]));
+			__DSB(); __ISB();
+
+			epc_tempsens_factory_offset[idx] = (float)temp_offset/4.7 - (float)0x12b;
+
+		}
+			/*
+				Weird i2c bug: if epc_i2c_read is used, then write operations, _two_ write operations later the write fails
+				because the previous write DMA is unfinished. It seems this is because of spurious STOPF interrupt happening
+				somewhere between the first (succesful) epc_i2c_write and while(epc_i2c_is_busy()).  I can't get the interrupt
+				away, no matter what I try. A small delay after the i2c read operation fixes the issue temporarily. 
+				Empirically found out that delay_us(8) is not enough while delay_us(10) is (of course add a safety margin there).
+
+			*/
+			delay_us(50);
+
+
 		{
 			epc_wrbuf[0] = 0xcc; // tcmi polarity settings
 			epc_wrbuf[1] = 1<<0 /*dclk rising edge*/ | 1<<7 /*saturate data*/; // bit 0 actually defaults to 1, at least on stock sequencer
 			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 			while(epc_i2c_is_busy(buses[idx]));
+			__DSB(); __ISB();
 		}
+
 
 		{
 			epc_wrbuf[0] = 0x89; 
@@ -1241,6 +1457,8 @@ void top_init()
 			epc_i2c_write(buses[idx], addrs[idx], epc_wrbuf, 2);
 			while(epc_i2c_is_busy(buses[idx]));
 		}
+
+
 	
 	}
 
@@ -1320,7 +1538,7 @@ void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, i
 					dcs31_mod = tmp;
 				}
 
-				if(dcs20_mod == 0 || sq(dcs20)+sq(dcs31) < sq(400))
+				if(dcs20_mod == 0 || sq(dcs20)+sq(dcs31) < sq(350))
 				{
 					underexps++;
 				}
@@ -1416,18 +1634,20 @@ int run_offset_cal(uint8_t idx)
 			}
 			else if(n_valids < (OFFSET_CALC_NUM_PX*9/10))
 			{
-				int_time = (int_time*6)/5;
+				int_time = (int_time*7)/6;
 			}
 			else
 			{
-				settings.offsets[idx][clkdiv] = -1*(dist_sum/n_valids) + 150;
+				settings.offsets[idx][clkdiv] = -1*(dist_sum/n_valids) + 75;
 				break;
 			}
 
 			delay_ms(100); // Let the LED dies cool down a bit - we never do super-long bursts on a single camera in the actual usage, either.
 		}
-		delay_ms(200);
+		delay_ms(250);
 	} 
+
+	settings.offsets_at_temps[idx] = temperatures[idx];
 
 	save_flash_settings();
 	refresh_settings();
@@ -1584,8 +1804,33 @@ int poll_capt_with_timeout()
 
 	while(DMA2_Stream7->NDTR > 1 && timeout>0) timeout--;
 
-//	while(!epc_capture_finished && timeout>0) timeout--;
-//	epc_capture_finished = 0;
+	if(timeout == 0)
+	{
+		// Disable the stream
+		DMA2_Stream7->CR = 1UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ |
+				   0b10UL<<13 /*32-bit mem*/ | 0b10UL<<11 /*32-bit periph*/ |
+			           1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
+
+		DMA_CLEAR_INTFLAGS(DMA2, 7);
+
+		err_cnt++;
+		raspi_tx.dbg_i32[6] = err_cnt;
+		if(err_cnt > 200)
+		{
+			error(10);
+		}
+		return 1;
+	}
+
+	return 0;
+}
+
+
+int poll_capt_with_timeout_complete()
+{
+	int timeout = 1600000;
+
+	while(DMA2_Stream7->NDTR > 0 && timeout>0) timeout--;
 
 	if(timeout == 0)
 	{
@@ -1600,13 +1845,10 @@ int poll_capt_with_timeout()
 		raspi_tx.dbg_i32[6] = err_cnt;
 		if(err_cnt > 200)
 		{
-			error(55);
+			error(11);
 		}
 		return 1;
 	}
-
-//	while(!epc_capture_finished) ;
-//	epc_capture_finished = 0;
 
 	return 0;
 }
@@ -1716,7 +1958,6 @@ Conclusion: >15 is the only place that can be optimized (tof_calc_dist_ampl, whi
 
 */
 
-
 void epc_test()
 {
 	int idx = 0;
@@ -1729,9 +1970,10 @@ void epc_test()
 #endif
 		raspi_tx.sensor_idx = idx;
 
-		raspi_tx.timestamps[21] = settings.offsets[idx][1];
-		raspi_tx.timestamps[22] = settings.offsets[idx][2];
-		raspi_tx.timestamps[23] = settings.offsets[idx][3];
+		raspi_tx.timestamps[10] = settings.offsets_at_temps[idx];
+		raspi_tx.timestamps[11] = settings.offsets[idx][1];
+		raspi_tx.timestamps[12] = settings.offsets[idx][2];
+		raspi_tx.timestamps[13] = settings.offsets[idx][3];
 
 
 		timer_10k = 0;
@@ -1801,10 +2043,6 @@ void epc_test()
 		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
-#ifdef SEND_EXTRA
-		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
-#endif
-
 
 
 		/*
@@ -1826,6 +2064,11 @@ void epc_test()
 		// Calculate the previous
 		calc_interference_ignore_from_2dcs(ignore, &dcsb, 60);
 
+#ifdef SEND_EXTRA
+		if(raspi_rx[4] == 2) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+#endif
+
+
 		epc_greyscale(idx);	// FOR THE NEXT
 		while(epc_i2c_is_busy(buses[idx]));
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // FOR THE NEXT
@@ -1840,11 +2083,18 @@ void epc_test()
 			LEDS OFF
 			MONOCHROME
 			Mid exp
-			Purpose: Ambient light compensation monochrome
+			Purpose: Ambient light compensation monochrome; also converts the temperature sensor reading
+
+			Note: The temperature readout has a weird implementation: first we do some bit magic on two otherwise unspecified registers,
+			then we need to actually capture a B&W image (which is needed anyway, luckily), and as a side effect, this image will have 2.5 times
+			less sensitivity than if it was taken without the temperature measurement active. Again, luckily, this image is for BG illumination
+			compensation only, which is rather inaccurate anyway, so reduced sensitivity / increased SNR is not an issue.
 		*/
 
 		epc_clk_div(idx, 1);
 		while(epc_i2c_is_busy(buses[idx]));
+
+		epc_temperature_magic_mode(idx);
 
 		dcmi_start_dma(&mono_comp, SIZEOF_MONO);
 
@@ -1854,31 +2104,60 @@ void epc_test()
 		// Calculate the previous
 		calc_toofar_ignore_from_2dcs(ignore, &dcsa, 5500, settings.offsets[idx][3], 3);
 
+#ifdef SEND_EXTRA
+		if(raspi_rx[4] == 3) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
+#endif
+
+
+#ifdef DUALINT
 		epc_4dcs_dualint(idx); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
-
 		epc_dualphase_or_int(idx); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_intlen_dual(idx, 8, /*odd rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER, /*even rows:*/ SHORTEST_INTEGRATION); // for the next
+//		epc_intlen_dual(idx, 8, /*even rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER, /*odd rows:*/ SHORTEST_INTEGRATION); // for the next
+		epc_intlen_dual(idx, 1, /*even rows:*/ 8000, /*odd rows:*/ 8000); // for the next
+//		epc_intlen_dual(idx, 8, /*even rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER, /*odd rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
+#else
+		epc_4dcs(idx); // for the next
+		while(epc_i2c_is_busy(buses[idx]));
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION); // for the next
+		while(epc_i2c_is_busy(buses[idx]));
+#endif
 
-		if(poll_capt_with_timeout()) continue;
+		if(poll_capt_with_timeout_complete()) continue;
 		LED_OFF();
+
+		int32_t temp = epc_read_temperature_regs(idx);
+
+		temperatures[idx] = ((float)(temp-0x2000)*0.134 + epc_tempsens_factory_offset[idx])*10.0;
+		raspi_tx.timestamps[20] = temperatures[idx];
+
+		epc_temperature_magic_mode_off(idx);
+
+		int tempcomp = ((float)(temperatures[idx] - settings.offsets_at_temps[idx])/10.0)  * 17.0 /*mm per 1 degC*/;
+
+
 
 
 		/*
 			20 MHz (wrap at 7.5m)
 			LEDS ON
 			4DCS
-			Short exp, Mid exp in dual integration mode
+			Short exp, Mid exp in dual integration mode; or just the short exp
 			Purpose: The real thing starts here! Shortest of the three HDR aqcuisition. Shortest first, because
 			it'll include the closest objects, and the closest are likely to move most during the
 			whole process -> minimize their motion blur, i.e., the ignore list is fairly recent now.
 		*/
 
+#ifdef DUALINT
 		static uint8_t  actual_ampl[2*EPC_XS*EPC_YS];
 		static uint16_t actual_dist[2*EPC_XS*EPC_YS];
+#else
+		static uint8_t  actual_ampl[3*EPC_XS*EPC_YS];
+		static uint16_t actual_dist[3*EPC_XS*EPC_YS];
+#endif
 
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
 		trig(idx);
@@ -1888,26 +2167,65 @@ void epc_test()
 		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, mono_comp.img, sizeof(ignore));
 #endif
 
+#ifdef DUALINT
+		epc_normalphase_or_int(idx); // for the next
+		while(epc_i2c_is_busy(buses[idx]));
+		epc_4dcs(idx); // for the next
+		while(epc_i2c_is_busy(buses[idx])); 
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
+#else
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
+		while(epc_i2c_is_busy(buses[idx]));
+#endif
 
 		if(poll_capt_with_timeout()) continue;
 
+
 		LED_OFF();
-
-
 
 
 		/*
 			20 MHz (wrap at 7.5m)
 			LEDS ON
 			4DCS
-			Long exp
+			Mid exp (if not in dual int mode)
 			Purpose: The real thing continues.
 		*/
 
+#ifdef DUALINT
+
+		// Do nothing
+
+#else
 
 		dcmi_start_dma(&dcsb, SIZEOF_4DCS);
+		trig(idx);
+		LED_ON();
+
+		// Calc the previous:
+		tof_calc_dist_ampl(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1]-tempcomp, 1);
+		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER); // for the next
+		while(epc_i2c_is_busy(buses[idx]));
+
+		if(poll_capt_with_timeout()) continue;
+
+		LED_OFF();
+#endif
+
+		/*
+			20 MHz (wrap at 7.5m)
+			LEDS ON
+			4DCS
+			Long exp
+			Purpose: The real thing continues: the last shot.
+		*/
+
+#ifdef DUALINT
+		dcmi_start_dma(&dcsb, SIZEOF_4DCS);
+#else
+		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
+#endif
 		trig(idx);
 		LED_ON();
 
@@ -1915,12 +2233,12 @@ void epc_test()
 
 		// Calculate the previous
 		// tof_calc_dist_ampl works with the dual-integration data as well, it processes pixel-by-pixel
-		tof_calc_dist_ampl(&actual_ampl[0], &actual_dist[0], &dcsa, settings.offsets[idx][1], 1);
-
-#ifdef SEND_EXTRA
-		if(raspi_rx[4] == 5) memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
-		if(raspi_rx[4] == 6) memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
+#ifdef DUALINT
+		tof_calc_dist_ampl(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1]-tempcomp, 1);
+#else
+		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[idx][1]-tempcomp, 1);
 #endif
+
 
 
 
@@ -1934,31 +2252,43 @@ void epc_test()
 		raspi_tx.status = 20;
 
 
-#ifdef SEND_EXTRA
-		if(raspi_rx[4] == 7) memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
-		if(raspi_rx[4] == 8) memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
-#endif
-
 								raspi_tx.timestamps[1] = timer_10k;
 
 
 		// All captures done.
 
 		// Calculate the last measurement:
-		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1], 1);
-
+#ifdef DUALINT
+		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[idx][1]-tempcomp, 1);
+#else
+		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1]-tempcomp, 1);
+#endif
 
 #ifdef SEND_EXTRA
+#ifdef DUALINT
+		if(raspi_rx[4] == 5) memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
+		if(raspi_rx[4] == 6) memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
+		if(raspi_rx[4] == 7)  memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
+		if(raspi_rx[4] == 8)  memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
+#else
+		if(raspi_rx[4] == 5)  memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
+		if(raspi_rx[4] == 6)  memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
+		if(raspi_rx[4] == 7)  memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
+		if(raspi_rx[4] == 8)  memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
 		if(raspi_rx[4] == 9)  memcpy(raspi_tx.dbg, &actual_ampl[2*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 10) memcpy(raspi_tx.dbg, &actual_dist[2*EPC_XS*EPC_YS], 2*160*60);
+#endif
 #endif
 
 
 		uint16_t stray_ampl, stray_dist, outstray_n, outstray_ampl;
 
 		calc_stray_estimate(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &stray_ampl, &stray_dist);
+#ifdef DUALINT
 		outstray_n = calc_outside_stray_estimate(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &outstray_ampl);
-
+#else
+		outstray_n = calc_outside_stray_estimate(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &outstray_ampl);
+#endif
 		raspi_tx.dbg_i32[0] = stray_ampl;
 		raspi_tx.dbg_i32[1] = stray_dist;
 
@@ -1984,8 +2314,11 @@ void epc_test()
 				combined_stray_dist = stray_dist;
 			}
 
+#ifdef DUALINT
 			tof_calc_dist_3hdr_dualint_and_normal_with_ignore_with_straycomp(raspi_tx.depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
-
+#else
+			tof_calc_dist_3hdr_with_ignore_with_straycomp(raspi_tx.depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
+#endif
 		}
 
 								raspi_tx.timestamps[2] = timer_10k;
@@ -1993,10 +2326,10 @@ void epc_test()
 		raspi_tx.status = 255;
 
 #ifdef SEND_EXTRA
-		while(timer_10k < 10000)
+		while(timer_10k < 6000)
 #else
 //		while(timer_10k < ((idx==N_SENSORS-1)?1300:1200))
-		while(timer_10k < 10000)
+		while(timer_10k < 3000)
 #endif
 		{
 			if(new_rx)
@@ -2010,7 +2343,9 @@ void epc_test()
 					*((volatile uint32_t*)&raspi_rx[0]) = 0; // zero it out so that we don't do it again
 					uint8_t sensor_idx = *((volatile uint8_t*)&raspi_rx[4]);
 					__DSB(); __ISB();
-					int ret = run_offset_cal(sensor_idx);
+					int ret = 999;
+					if(sensor_idx < N_SENSORS-1)
+						ret = run_offset_cal(sensor_idx);
 					raspi_tx.dbg_i32[7] = ret;
 				}
 
@@ -2020,7 +2355,7 @@ void epc_test()
 		cnt++;
 
 
-//		idx++;
+	//	idx++;
 		if(idx >= N_SENSORS) idx = 0;
 	}
 
@@ -2306,7 +2641,7 @@ void main()
 	TIM5->ARR = 10799; // 108MHz -> 10 kHz
 	TIM5->CR1 |= 1UL; // Enable
 
-	NVIC_SetPriority(TIM5_IRQn, 0b1010);
+	NVIC_SetPriority(TIM5_IRQn, 0b1111);
 	NVIC_EnableIRQ(TIM5_IRQn);
 
 	LED_OFF();
