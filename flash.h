@@ -32,7 +32,7 @@ typedef struct __attribute__((packed)) __attribute__((aligned(4)))
 	int32_t offsets_at_temps[4];
 } settings_t;
 
-extern settings_t settings;
+extern volatile settings_t settings;
 
 
 #endif

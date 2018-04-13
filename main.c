@@ -126,6 +126,7 @@ int temperatures[N_SENSORS]; // in degs/10
 #define abso(x) ((x<0)?(-x):(x))
 
 volatile int new_rx, new_rx_len;
+volatile int robot_new_rx, robot_new_rx_len;
 
 
 typedef struct __attribute__((packed))
@@ -154,11 +155,9 @@ void delay_ms(uint32_t i)
 	}
 }
 
+#ifdef USE_UART
 static void uart_print_string_blocking(const char *buf)
 {
-	#ifndef USE_UART
-		return;
-	#endif
 	while(buf[0] != 0)
 	{
 		while((USART3->ISR & (1UL<<7)) == 0) ;
@@ -166,6 +165,7 @@ static void uart_print_string_blocking(const char *buf)
 		buf++;
 	}
 }
+#endif
 
 void error(int code)
 {
@@ -185,18 +185,26 @@ void error(int code)
 	__enable_irq();
 
 	int i = 0;
+	int o = 0;
 	while(1)
 	{
 		LED_ON();
-		delay_ms(250);
+		delay_ms(120);
 		LED_OFF();
-		delay_ms(250);
+		delay_ms(120);
 
 		i++;
 		if(i >= code)
 		{
 			i = 0;
-			delay_ms(1000);
+			delay_ms(600);
+			o++;
+
+			if(o > 5)
+			{
+				NVIC_SystemReset();
+				while(1);
+			}
 		}
 
 	}
@@ -229,7 +237,7 @@ volatile int epc_i2c_read_state[N_I2C];
 uint8_t epc_i2c_read_slave_addr[N_I2C];
 volatile uint8_t *epc_i2c_read_buf[N_I2C];
 uint8_t epc_i2c_read_len[N_I2C];
-
+volatile int init_err_cnt = 0;
 void epc_i2c_write_dma(uint8_t bus, uint8_t slave_addr_7b, volatile uint8_t *buf, uint8_t len)
 {
 	if(bus >= N_I2C) return;
@@ -238,21 +246,21 @@ void epc_i2c_write_dma(uint8_t bus, uint8_t slave_addr_7b, volatile uint8_t *buf
 	__DSB(); __ISB();
 
 	if(epc_i2c_write_busy[bus] || epc_i2c_read_busy[bus] || epc_i2c_read_state[bus])
-		error(5);
+		error(4);
 
 	if(DMA1->LISR & 1UL<<0)
-		error(12);
+		error(5);
 	if(DMA1->LISR & 1UL<<2)
-		error(13);
+		error(6);
 	if(DMA1->LISR & 1UL<<3)
-		error(14);
+		error(7);
 
 	if(EPC_I2C_WR_DMAS[bus]->CR & 1UL)
 	{
 		if(DMA1->LISR & 1UL<<5)
-			error(15);
+			error(8);
 
-		error(6);
+		error(15+init_err_cnt);
 	}
 
 	epc_i2c_write_busy[bus] = 1;
@@ -334,7 +342,7 @@ void epc_i2c_read(uint8_t bus, uint8_t slave_addr_7b, uint8_t reg_addr, volatile
 	__DSB(); __ISB();
 
 	if(epc_i2c_write_busy[bus] || epc_i2c_read_busy[bus])
-		error(7);
+		error(10);
 	/*
 		Full I2C read cycle consists of a write cycle (payload = reg_addr), without stop condition,
 		then the actual read cycle starting with the repeated start condition.
@@ -395,7 +403,7 @@ void epc01_i2c_inthandler()
 	{
 		if(I2C3->ISR & (1UL<<15)) // busy shouldn't be high - at least fail instead of doing random shit
 		{
-			error(8);
+			error(11);
 		}
 
 		// Write is now finished.
@@ -417,7 +425,7 @@ void epc23_i2c_inthandler()
 	{
 		if(I2C4->ISR & (1UL<<15)) // busy shouldn't be high - at least fail instead of doing random shit
 		{
-			error(9);
+			error(12);
 		}
 
 		// Write is now finished.
@@ -644,6 +652,20 @@ void timebase_handler()
 	TIM5->SR = 0; // Clear interrupt flag
 	timer_10k++;
 }
+
+void tof_calc_ampl_hdr(uint8_t *ampl_out, uint8_t* long_in, uint8_t* short_in)
+{
+	for(int i=0; i<160*60; i++)
+	{
+		uint8_t out;
+		if(long_in[i] == 255)
+			out = 128+(short_in[i]>>1);
+		else
+			out = long_in[i]>>1;
+		ampl_out[i] = out;
+	}
+}
+
 
 /*
 Process four DCS images, with offset_mm in millimeters. With clk_div=1, does the calculation at fled=20MHz (unamb range = 7.5m). Larger clk_div
@@ -1096,12 +1118,17 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 	}
 }
 
-#define SHORTEST_INTEGRATION 100
-#define HDR_EXP_MULTIPLIER 6 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
+
+// has been: 100, 600, 3600
+// now is  : 80, 560, 3920
+
+#define SHORTEST_INTEGRATION 80
+#define HDR_EXP_MULTIPLIER 7 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
 
 #define STRAY_CORR_LEVEL 2000 // smaller -> more correction
 #define STRAY_BLANKING_LVL 40 // smaller -> more easily ignored
 
+#define STRAY_CORR_FACTOR 16 // bigger -> do more correction
 
 /*
 	ampl and dist are expected to contain 3*EPC_XS*EPC_YS elements: three images at different exposures that vary by HDR_EXP_MULTIPLIER
@@ -1109,7 +1136,7 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore_in, uint16_t stray_ampl, uint16_t stray_dist)
 {
 	int stray_ignore = stray_ampl/STRAY_BLANKING_LVL;
-	if(stray_ignore < 2) stray_ignore = 2;
+	if(stray_ignore < 5) stray_ignore = 5;
 	for(int yy=0; yy < EPC_YS; yy++)
 	{
 		for(int xx=0; xx < EPC_XS; xx++)
@@ -1152,7 +1179,7 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 					int32_t combined_ampl = (ampl0*suit0 + ampl1*suit1 + ampl2*suit2)/suit_sum;
 					int32_t combined_dist = (dist0*suit0 + dist1*suit1 + dist2*suit2)/suit_sum;
 
-					int32_t corr_amount = ((16*(int32_t)stray_ampl)/(int32_t)combined_ampl);
+					int32_t corr_amount = ((STRAY_CORR_FACTOR*(int32_t)stray_ampl)/(int32_t)combined_ampl);
 
 					// Expect higher amplitude from "close" pixels. If the amplitude is low, they are artefacts most likely.
 					int32_t expected_ampl;
@@ -1183,6 +1210,41 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 
 			}
 
+		}
+	}
+}
+
+/*
+	threshold = 250mm
+	Starts to eat some areas away, but would be perfectly usable if good filtration is important
+
+	threshold = 500mm
+	Doesn't filter all real-world midliers
+*/
+#define MIDLIER_THRESHOLD 300
+void tof_remove_midliers(uint16_t* out, uint16_t* in)
+{
+	memset(out, 0, 2*EPC_XS*EPC_YS);
+	for(int xx=0; xx<EPC_XS; xx++)
+	{
+		for(int yy=0; yy<EPC_YS; yy++)
+		{
+			int pxval = in[yy*EPC_XS+xx];
+
+			int min = pxval-MIDLIER_THRESHOLD;
+			int max = pxval+MIDLIER_THRESHOLD;
+
+			for(int xxx=xx-1; xxx<=xx+1; xxx++)
+			{
+				for(int yyy=yy-1; yyy<=yy+1; yyy++)
+				{
+					if((xxx>=0 && xxx<EPC_XS && yyy>=0 && yyy<EPC_YS) && (in[yyy*EPC_XS+xxx] < min || in[yyy*EPC_XS+xxx] > max))
+						goto MIDLIER_FOUND;
+				}
+			}
+
+			out[yy*EPC_XS+xx] = pxval;
+			MIDLIER_FOUND: continue;
 		}
 	}
 }
@@ -1299,6 +1361,27 @@ void process_dcs(uint8_t *out, epc_img_t *in)
 typedef struct __attribute__((packed)) __attribute__((aligned(4)))
 {
 	uint32_t header;
+
+	pos_t robot_pos;
+
+} robot_to_pulutof_t;
+
+typedef struct __attribute__((packed)) __attribute__((aligned(4)))
+{
+	uint32_t header;
+
+	pos_t dummy;
+
+} pulutof_to_robot_t;
+
+volatile robot_to_pulutof_t robot_to_pulutof;
+volatile pulutof_to_robot_t pulutof_to_robot;
+
+volatile pos_t latest_pos;
+
+typedef struct __attribute__((packed)) __attribute__((aligned(4)))
+{
+	uint32_t header;
 	uint8_t status; // Only read this far and deassert chip select for polling the status.
 	uint8_t dummy1;
 	uint8_t dummy2;
@@ -1307,7 +1390,7 @@ typedef struct __attribute__((packed)) __attribute__((aligned(4)))
 	pos_t robot_pos; // Robot pose during the acquisition
 
 	uint16_t depth[EPC_XS*EPC_YS];
-//	uint8_t  ampl[EPC_XS*EPC_YS];
+	uint8_t  ampl[EPC_XS*EPC_YS];
 //	uint8_t  ambient[EPC_XS*EPC_YS];
 #ifdef SEND_EXTRA
 	uint16_t uncorrected_depth[EPC_XS*EPC_YS];
@@ -1365,6 +1448,7 @@ void top_init()
 	for(int idx = 0; idx < N_SENSORS; idx++)
 //	for(int idx = 0; idx < 1; idx++)
 	{
+		init_err_cnt = idx;
 		delay_ms(10);
 
 		// Reprogram the sequencer binary:
@@ -1639,16 +1723,18 @@ int run_offset_cal(uint8_t idx)
 			else
 			{
 				settings.offsets[idx][clkdiv] = -1*(dist_sum/n_valids) + 75;
+				__DSB(); __ISB();
 				break;
 			}
 
-			delay_ms(100); // Let the LED dies cool down a bit - we never do super-long bursts on a single camera in the actual usage, either.
+			delay_ms(70); // Let the LED dies cool down a bit - we never do super-long bursts on a single camera in the actual usage, either.
 		}
 		delay_ms(250);
 	} 
 
 	settings.offsets_at_temps[idx] = temperatures[idx];
 
+	__DSB(); __ISB();
 	save_flash_settings();
 	refresh_settings();
 	return 0;
@@ -1759,23 +1845,25 @@ static int32_t calc_outside_stray_estimate(uint8_t* ampl_in, uint16_t* dist_in, 
 			{
 
 				int64_t dist = dist_in[pix_i]; if(dist < 100) dist = 100;
-				int64_t ampl = ampl_in[pix_i]; if(ampl == 255) ampl = 10000;
+				int64_t ampl = ampl_in[pix_i]; if(ampl == 255) ampl = 20000;
 
-				int estimate = (int64_t)10000000/( ampl * sq(dist) );
+				int estimate = (int64_t)100000000/( ampl * sq(dist) );
 
 				/*
 					Examples how the equation works out:
-					ampl=255->10000, dist<=100->100:     0
-					ampl=200         dist = 100:         5
-					ampl=200         dist = 200:         1
-					ampl=50          dist = 100:         20
-					ampl=50          dist = 200:         5
-					ampl=10          dist = 100:         100 (should really ring a bell)
-					ampl=10          dist = 200:         25  (not impossible, but shady)
-					ampl=10          dist = 500:         4   (only slighly weird)
-					ampl=10          dist = 1000:        1   (completely plausible)
-					ampl=3           dist<=100->100:     333 (biggest value)
+					ampl=255->20000, dist<=100->100:     0
+					ampl=200         dist = 100:         50
+					ampl=200         dist = 200:         12
+					ampl=50          dist = 100:         200 (should really ring a bell)
+					ampl=50          dist = 200:         50
+					ampl=10          dist = 100:         1000 
+					ampl=10          dist = 200:         250
+					ampl=10          dist = 500:         40   (only slighly weird)
+					ampl=10          dist = 1000:        10   (plausible)
+					ampl=3           dist<=100->100:     3333 (biggest value)
 				*/
+
+				if(estimate > 500) estimate = 500;
 
 				acc += estimate;
 				n_acc++;
@@ -1785,7 +1873,7 @@ static int32_t calc_outside_stray_estimate(uint8_t* ampl_in, uint16_t* dist_in, 
 
 	if(n_acc>200)
 	{
-		int amnt = 10*acc/n_acc;
+		int amnt = acc/n_acc;
 		if(amnt > 65535) amnt = 65535;
 		*stray_ampl = amnt;
 	}
@@ -1817,7 +1905,7 @@ int poll_capt_with_timeout()
 		raspi_tx.dbg_i32[6] = err_cnt;
 		if(err_cnt > 200)
 		{
-			error(10);
+			error(13);
 		}
 		return 1;
 	}
@@ -1845,7 +1933,7 @@ int poll_capt_with_timeout_complete()
 		raspi_tx.dbg_i32[6] = err_cnt;
 		if(err_cnt > 200)
 		{
-			error(11);
+			error(14);
 		}
 		return 1;
 	}
@@ -2001,7 +2089,7 @@ void epc_run()
 		epc_2dcs(idx);
 		while(epc_i2c_is_busy(buses[idx]));
 
-		epc_intlen(idx, 8, 200);
+		epc_intlen(idx, 8, 600);
 		while(epc_i2c_is_busy(buses[idx]));
 		;
 
@@ -2043,6 +2131,8 @@ void epc_run()
 		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
 
+		raspi_tx.status = 45;
+
 
 
 		/*
@@ -2076,6 +2166,8 @@ void epc_run()
 
 		if(poll_capt_with_timeout()) continue;
 		LED_OFF();
+
+		raspi_tx.status = 37;
 
 
 		/*
@@ -2181,7 +2273,7 @@ void epc_run()
 
 		if(poll_capt_with_timeout()) continue;
 
-		raspi_tx.status = 35;
+		raspi_tx.status = 30;
 
 		LED_OFF();
 
@@ -2230,6 +2322,12 @@ void epc_run()
 		trig(idx);
 		LED_ON();
 
+		// This is a great time to copy the latest robot pose.
+		__disable_irq();
+		__DSB(); __ISB();
+		raspi_tx.robot_pos = latest_pos;
+		__DSB(); __ISB();
+		__enable_irq();
 
 
 		// Calculate the previous
@@ -2281,6 +2379,8 @@ void epc_run()
 #endif
 #endif
 
+		raspi_tx.status = 10;
+
 
 		uint16_t stray_ampl, stray_dist, outstray_n, outstray_ampl;
 
@@ -2300,7 +2400,7 @@ void epc_run()
 		// Then combine everything:
 		
 
-		raspi_tx.status = 8;
+		raspi_tx.status = 7;
 
 		{
 			uint16_t combined_stray_ampl, combined_stray_dist;
@@ -2315,22 +2415,27 @@ void epc_run()
 				combined_stray_dist = stray_dist;
 			}
 
+			static uint16_t combined_depth[EPC_XS*EPC_YS];
 #ifdef DUALINT
-			tof_calc_dist_3hdr_dualint_and_normal_with_ignore_with_straycomp(raspi_tx.depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
+			tof_calc_dist_3hdr_dualint_and_normal_with_ignore_with_straycomp(combined_depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
 #else
-			tof_calc_dist_3hdr_with_ignore_with_straycomp(raspi_tx.depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
+			tof_calc_dist_3hdr_with_ignore_with_straycomp(combined_depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
 #endif
+			tof_remove_midliers(raspi_tx.depth, combined_depth);
 		}
 
 								raspi_tx.timestamps[2] = timer_10k;
 
 		raspi_tx.status = 255;
+		// Bravely calculate the HDR amplitude image while DMA transfers the result
+		tof_calc_ampl_hdr(raspi_tx.ampl, &actual_ampl[2*EPC_XS*EPC_YS], &actual_ampl[1*EPC_XS*EPC_YS]);
 
 #ifdef SEND_EXTRA
 		while(timer_10k < ((idx==N_SENSORS-1)?3000:1500)) // 1.33 FPS
 #else
 //		while(timer_10k < ((idx==N_SENSORS-1)?1500:800)) // 2.6 FPS
-		while(timer_10k < ((idx==N_SENSORS-1)?2500:800)) // 2.04 FPS
+//		while(timer_10k < ((idx==N_SENSORS-1)?2500:800)) // 2.04 FPS
+		while(timer_10k < ((idx==N_SENSORS-1)?2000:900))
 #endif
 		{
 			if(new_rx)
@@ -2341,6 +2446,9 @@ void epc_run()
 
 				if(*((volatile uint32_t*)&raspi_rx[0]) == 0xca0ff5e7) // offset calibration cmd
 				{
+					raspi_tx.status = 100;
+					raspi_tx.dbg_i32[7] = 99999;
+
 					*((volatile uint32_t*)&raspi_rx[0]) = 0; // zero it out so that we don't do it again
 					uint8_t sensor_idx = *((volatile uint8_t*)&raspi_rx[4]);
 					__DSB(); __ISB();
@@ -2393,7 +2501,7 @@ volatile int spi_test_cnt;
 
 void raspi_spi_xfer_end_inthandler()
 {
-	// Triggered when cs goes high - switch DMA rx buffers, zero the tx buffer loc
+	// Triggered when cs goes high
 
 	EXTI->PR = 1UL<<12; // Clear "pending bit".
 
@@ -2460,19 +2568,59 @@ void raspi_spi_xfer_end_inthandler()
 	there's a continuous SPI transfer going on. With fixed length and no gaps,
 	it can fully run on DMA.
 
-	PULUTOF1 MASTER is the SPI MASTER, RobotBoard is slave.
+	PULUTOF1 MASTER is the SPI Slave, RobotBoard is Master.
 */
 
-typedef struct __attribute__((packed))
+void robot_spi_xfer_end_inthandler()
 {
-	uint8_t dummy[12];
-} master_to_robot_t;
+	// Triggered when cs goes high
+	EXTI->PR = 1UL<<6; // Clear "pending bit".
 
-typedef struct __attribute__((packed))
-{
-	pos_t robot_pos;
-} robot_to_master_t;
+	__DSB(); __ISB();
+	latest_pos = robot_to_pulutof.robot_pos;
+	__DSB(); __ISB();
 
+
+	// Disable the DMAs:
+	DMA2_Stream4->CR = 2UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
+			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
+	                   1UL<<10 /*mem increment*/ | 0b01UL<<6 /*mem-to-periph*/;
+	DMA2_Stream3->CR = 2UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
+			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
+	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
+
+	while(DMA2_Stream4->CR & 1UL) ;
+	while(DMA2_Stream3->CR & 1UL) ;
+
+	robot_new_rx = 1;
+	robot_new_rx_len = sizeof(robot_to_pulutof) - DMA2_Stream3->NDTR;
+
+	// Hard-reset SPI - the only way to empty TXFIFO! (Go figure.)
+
+	RCC->APB2RSTR = 1UL<<20;
+	__asm__ __volatile__ ("nop");
+	RCC->APB2RSTR = 0;
+			
+	// Re-enable:
+
+	SPI5->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/ | 1UL<<12 /*Don't Reject The Last Byte*/;
+
+	// TX DMA
+	DMA2_Stream4->NDTR = sizeof(pulutof_to_robot);
+	DMA_CLEAR_INTFLAGS(DMA2, 4);
+	DMA2_Stream4->CR |= 1; // Enable DMA
+
+	// RX DMA
+
+	DMA2_Stream3->NDTR = sizeof(robot_to_pulutof);
+	DMA_CLEAR_INTFLAGS(DMA2, 3);
+	DMA2_Stream3->CR |= 1; // Enable DMA
+
+	SPI5->CR2 |= 1UL<<1 /*TX DMA ena*/; // not earlier!
+
+	SPI5->CR1 = 1UL<<6; // Enable in slave mode
+
+}
 
 void main()
 {
@@ -2658,7 +2806,7 @@ void main()
 	delay_ms(100);
 */
 
-	// Raspi SPI:
+	// Raspi SPI: SLAVE
 
 	IO_ALTFUNC(GPIOB, 12, 5);
 	IO_ALTFUNC(GPIOB, 13, 5);
@@ -2719,6 +2867,60 @@ void main()
 	// FIFO in the SPI is exhausted.
 	NVIC_SetPriority(EXTI15_10_IRQn, 0b0101);
 	NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+
+	// Robot SPI: SLAVE
+
+	IO_ALTFUNC(GPIOF, 6, 5);
+	IO_ALTFUNC(GPIOF, 7, 5);
+	IO_ALTFUNC(GPIOF, 8, 5);
+	IO_ALTFUNC(GPIOF, 9, 5);
+
+	// Use the second-highest speed
+	IO_SPEED(GPIOF, 8, 2); // MISO
+
+
+	// Initialization order from reference manual:
+	SPI5->CR2 = 0b0111UL<<8 /*8-bit data*/ | 1UL<<0 /*RX DMA ena*/ | 1UL<<12 /*Don't Reject The Last Byte*/;
+
+	// TX DMA
+	DMA2_Stream4->PAR = (uint32_t)&(SPI5->DR);
+	DMA2_Stream4->M0AR = (uint32_t)&pulutof_to_robot;
+	DMA2_Stream4->CR = 2UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
+			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
+	                   1UL<<10 /*mem increment*/ | 0b01UL<<6 /*mem-to-periph*/;
+	DMA2_Stream4->NDTR = sizeof(raspi_tx);
+	DMA_CLEAR_INTFLAGS(DMA2, 4);
+	DMA2_Stream4->CR |= 1; // Enable TX DMA
+
+	// RX DMA
+
+	DMA2_Stream3->PAR = (uint32_t)&(SPI5->DR);
+	DMA2_Stream3->M0AR = (uint32_t)&robot_to_pulutof;
+	DMA2_Stream3->CR = 2UL<<25 /*Channel*/ | 0b01UL<<16 /*med prio*/ | 0UL<<8 /*circular OFF*/ |
+			   0b00UL<<13 /*8-bit mem*/ | 0b00UL<<11 /*8-bit periph*/ |
+	                   1UL<<10 /*mem increment*/ | 0b00UL<<6 /*periph-to-mem*/;
+	DMA2_Stream3->NDTR = sizeof(raspi_rx);
+	DMA_CLEAR_INTFLAGS(DMA2, 3);
+	DMA2_Stream3->CR |= 1; // Enable RX DMA
+
+	SPI5->CR2 |= 1UL<<1 /*TX DMA ena*/; // not earlier!
+
+	SPI5->CR1 = 1UL<<6; // Enable in slave mode
+
+	// Chip select is hardware managed for rx start - but ending must be handled by software. We use EXTI for that.
+
+	// nCS is PF6, so EXTI6 must be used.
+	SYSCFG->EXTICR[/*refman idx:*/2   -1] = 0b0101UL<<8; // PORTF used for EXTI6.
+	IO_PULLUP_ON(GPIOF, 6); // Pull the nCS up to avoid glitches
+	EXTI->IMR |= 1UL<<6;
+	EXTI->RTSR |= 1UL<<6; // Get the rising edge interrupt
+	// The interrupt priority must be fairly high, to quickly reconfigure the DMA so that if the master pulls CSn low
+	// again very quickly to make a new transaction, we have the DMA up and running for that before the super small 4-byte
+	// FIFO in the SPI is exhausted.
+	NVIC_SetPriority(EXTI9_5_IRQn, 0b0101);
+	NVIC_EnableIRQ(EXTI9_5_IRQn);
+
 
 	top_init();
 	epc_run();

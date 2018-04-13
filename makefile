@@ -29,10 +29,13 @@ main.bin: $(OBJ)
 # Since bss sections have nothing to do in the binary, we can just as well remove them from the output file.
 # .settings is also removed - this makes the binary small, and keeps the old settings
 
+f: main.bin
+	scp main_full.bin pulu@$(robot):~/rn1-tools/pulutof_fw.bin
+
 fr: main.bin
 #	scp main_full.bin hrst@192.168.130.149:~/main_full.bin
-#	scp main_full.bin hrst@192.168.1.3:~/main_full.bin
-	scp main_full.bin hrst@10.8.0.18:~/main_full.bin
+	scp main_full.bin hrst@192.168.43.125:~/main_full.bin
+#	scp main_full.bin hrst@10.8.0.18:~/main_full.bin
 
 flash_full: main.bin
 	stm32sprog -b 115200 -vw main_full.bin

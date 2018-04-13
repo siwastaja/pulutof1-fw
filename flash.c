@@ -98,7 +98,7 @@ static int flash_erase_sector(int sector)
 	return 0;
 }
 
-settings_t settings __attribute__((section(".settings")));
+volatile settings_t settings __attribute__((section(".settings")));
 
 void save_flash_settings()
 {

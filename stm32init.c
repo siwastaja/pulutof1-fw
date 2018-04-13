@@ -17,6 +17,7 @@ extern void epc_shutdown_inthandler();
 extern void epc01_rx_dma_inthandler();
 extern void epc23_rx_dma_inthandler();
 extern void raspi_spi_xfer_end_inthandler();
+extern void robot_spi_xfer_end_inthandler();
 extern void timebase_handler();
 extern unsigned int _STACKTOP;
 
@@ -62,7 +63,7 @@ unsigned int * the_nvic_vector[126] __attribute__ ((section(".nvic_vector"))) =
 /* 0x0090                    */ (unsigned int *) invalid_handler,
 /* 0x0094                    */ (unsigned int *) invalid_handler,
 /* 0x0098                    */ (unsigned int *) invalid_handler,
-/* 0x009C EXTI5..9           */ (unsigned int *) invalid_handler,
+/* 0x009C EXTI5..9           */ (unsigned int *) robot_spi_xfer_end_inthandler,
 /* 0x00A0                    */ (unsigned int *) invalid_handler,
 /* 0x00A4 TIM1_UP_TIM10      */ (unsigned int *) invalid_handler,
 /* 0x00A8                    */ (unsigned int *) invalid_handler,
