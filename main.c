@@ -1,6 +1,6 @@
 //#define SEND_EXTRA
 #define FAST_APPROX_AMPLITUDE
-//#define DUALINT // If defined, two shortest exposures are taken in half-resolution dual integration time HDR mode.
+
 
 #include <stdint.h>
 #include <string.h>
@@ -2201,22 +2201,11 @@ void epc_run()
 #endif
 
 
-#ifdef DUALINT
-		epc_4dcs_dualint(idx); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
-		epc_dualphase_or_int(idx); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
 
-//		epc_intlen_dual(idx, 8, /*even rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER, /*odd rows:*/ SHORTEST_INTEGRATION); // for the next
-		epc_intlen_dual(idx, 1, /*even rows:*/ 8000, /*odd rows:*/ 8000); // for the next
-//		epc_intlen_dual(idx, 8, /*even rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER, /*odd rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
-#else
 		epc_4dcs(idx); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
-#endif
 
 		if(poll_capt_with_timeout_complete()) continue;
 		LED_OFF();
@@ -2243,13 +2232,8 @@ void epc_run()
 			whole process -> minimize their motion blur, i.e., the ignore list is fairly recent now.
 		*/
 
-#ifdef DUALINT
-		static uint8_t  actual_ampl[2*EPC_XS*EPC_YS];
-		static uint16_t actual_dist[2*EPC_XS*EPC_YS];
-#else
 		static uint8_t  actual_ampl[3*EPC_XS*EPC_YS];
 		static uint16_t actual_dist[3*EPC_XS*EPC_YS];
-#endif
 
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
 		trig(idx);
@@ -2259,17 +2243,9 @@ void epc_run()
 		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, mono_comp.img, sizeof(ignore));
 #endif
 
-#ifdef DUALINT
-		epc_normalphase_or_int(idx); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
-		epc_4dcs(idx); // for the next
-		while(epc_i2c_is_busy(buses[idx])); 
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
-#else
+
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
-#endif
 
 		if(poll_capt_with_timeout()) continue;
 
@@ -2286,11 +2262,6 @@ void epc_run()
 			Purpose: The real thing continues.
 		*/
 
-#ifdef DUALINT
-
-		// Do nothing
-
-#else
 
 		dcmi_start_dma(&dcsb, SIZEOF_4DCS);
 		trig(idx);
@@ -2304,7 +2275,6 @@ void epc_run()
 		if(poll_capt_with_timeout()) continue;
 
 		LED_OFF();
-#endif
 
 		/*
 			20 MHz (wrap at 7.5m)
@@ -2314,11 +2284,9 @@ void epc_run()
 			Purpose: The real thing continues: the last shot.
 		*/
 
-#ifdef DUALINT
-		dcmi_start_dma(&dcsb, SIZEOF_4DCS);
-#else
+
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
-#endif
+
 		trig(idx);
 		LED_ON();
 
@@ -2332,51 +2300,31 @@ void epc_run()
 
 		// Calculate the previous
 		// tof_calc_dist_ampl works with the dual-integration data as well, it processes pixel-by-pixel
-#ifdef DUALINT
-		tof_calc_dist_ampl(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1]-tempcomp, 1);
-#else
+
 		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[idx][1]-tempcomp, 1);
-#endif
-
-
-
-
 
 		if(poll_capt_with_timeout()) continue;
 
 		LED_OFF();
 
-
-
 		raspi_tx.status = 15;
-
-
-								raspi_tx.timestamps[1] = timer_10k;
+		raspi_tx.timestamps[1] = timer_10k;
 
 
 		// All captures done.
 
 		// Calculate the last measurement:
-#ifdef DUALINT
-		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[idx][1]-tempcomp, 1);
-#else
+
 		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1]-tempcomp, 1);
-#endif
+
 
 #ifdef SEND_EXTRA
-#ifdef DUALINT
-		if(raspi_rx[4] == 5) memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
-		if(raspi_rx[4] == 6) memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
-		if(raspi_rx[4] == 7)  memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
-		if(raspi_rx[4] == 8)  memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
-#else
 		if(raspi_rx[4] == 5)  memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
 		if(raspi_rx[4] == 6)  memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
 		if(raspi_rx[4] == 7)  memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 8)  memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
 		if(raspi_rx[4] == 9)  memcpy(raspi_tx.dbg, &actual_ampl[2*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 10) memcpy(raspi_tx.dbg, &actual_dist[2*EPC_XS*EPC_YS], 2*160*60);
-#endif
 #endif
 
 		raspi_tx.status = 10;
@@ -2385,11 +2333,9 @@ void epc_run()
 		uint16_t stray_ampl, stray_dist, outstray_n, outstray_ampl;
 
 		calc_stray_estimate(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &stray_ampl, &stray_dist);
-#ifdef DUALINT
-		outstray_n = calc_outside_stray_estimate(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &outstray_ampl);
-#else
+
 		outstray_n = calc_outside_stray_estimate(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &outstray_ampl);
-#endif
+		
 		raspi_tx.dbg_i32[0] = stray_ampl;
 		raspi_tx.dbg_i32[1] = stray_dist;
 
@@ -2416,11 +2362,8 @@ void epc_run()
 			}
 
 			static uint16_t combined_depth[EPC_XS*EPC_YS];
-#ifdef DUALINT
-			tof_calc_dist_3hdr_dualint_and_normal_with_ignore_with_straycomp(combined_depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
-#else
+
 			tof_calc_dist_3hdr_with_ignore_with_straycomp(combined_depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
-#endif
 			tof_remove_midliers(raspi_tx.depth, combined_depth);
 		}
 
@@ -2449,8 +2392,8 @@ void epc_run()
 					raspi_tx.status = 100;
 					raspi_tx.dbg_i32[7] = 99999;
 
-					*((volatile uint32_t*)&raspi_rx[0]) = 0; // zero it out so that we don't do it again
-					uint8_t sensor_idx = *((volatile uint8_t*)&raspi_rx[4]);
+//					*((volatile uint32_t*)&raspi_rx[0]) = 0; // zero it out so that we don't do it again
+					uint8_t sensor_idx = raspi_rx[4];
 					__DSB(); __ISB();
 					int ret = 999;
 					if(sensor_idx < N_SENSORS)
