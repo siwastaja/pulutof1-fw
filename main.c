@@ -1,6 +1,5 @@
 //#define SEND_EXTRA
 #define FAST_APPROX_AMPLITUDE
-//#define DUALINT // If defined, two shortest exposures are taken in half-resolution dual integration time HDR mode.
 
 #include <stdint.h>
 #include <string.h>
@@ -1119,16 +1118,15 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 }
 
 
-// has been: 100, 600, 3600
-// now is  : 80, 560, 3920
+// exposures  : 120, 960, 7680
 
-#define SHORTEST_INTEGRATION 80
-#define HDR_EXP_MULTIPLIER 7 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
+#define SHORTEST_INTEGRATION 120
+#define HDR_EXP_MULTIPLIER 8 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
 
-#define STRAY_CORR_LEVEL 2000 // smaller -> more correction
-#define STRAY_BLANKING_LVL 40 // smaller -> more easily ignored
+#define STRAY_CORR_LEVEL 1024 // smaller -> more correction. 2000 for a long time
+#define STRAY_BLANKING_LVL 40 // smaller -> more easily ignored, was 40 for a long time
 
-#define STRAY_CORR_FACTOR 16 // bigger -> do more correction
+#define STRAY_CORR_FACTOR 64 // bigger -> do more correction - has been 16 for a long time
 
 /*
 	ampl and dist are expected to contain 3*EPC_XS*EPC_YS elements: three images at different exposures that vary by HDR_EXP_MULTIPLIER
@@ -1221,7 +1219,7 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 	threshold = 500mm
 	Doesn't filter all real-world midliers
 */
-#define MIDLIER_THRESHOLD 300
+#define MIDLIER_THRESHOLD 350
 void tof_remove_midliers(uint16_t* out, uint16_t* in)
 {
 	memset(out, 0, 2*EPC_XS*EPC_YS);
@@ -1245,95 +1243,6 @@ void tof_remove_midliers(uint16_t* out, uint16_t* in)
 
 			out[yy*EPC_XS+xx] = pxval;
 			MIDLIER_FOUND: continue;
-		}
-	}
-}
-
-
-/*
-	ampl and dist are expected to contain 2*EPC_XS*EPC_YS elements.
-	The first 1*EPC_XS*EPC_YS is a dual int mode set, even lines at shortest integration, odd lines at mid integration
-	The second is a single full image.
-*/
-void tof_calc_dist_3hdr_dualint_and_normal_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore_in, uint16_t stray_ampl, uint16_t stray_dist)
-{
-	int stray_ignore = stray_ampl/STRAY_BLANKING_LVL;
-	if(stray_ignore < 2) stray_ignore = 2;
-	for(int yy=0; yy < EPC_YS; yy++)
-	{
-		for(int xx=0; xx < EPC_XS; xx++)
-		{
-			int pxidx          = yy*EPC_XS+xx;
-			int pxidx_shortint = (yy&(~1UL))*EPC_XS+xx;
-			int pxidx_midint   = (yy | 1UL) *EPC_XS+xx;
-			if(     // On ignore list: either directly, or on any 8 neighbors.
-				ignore_in[pxidx] ||
-				( yy>0        &&    ( ignore_in[(yy-1)*EPC_XS+xx] || (xx>0 && ignore_in[(yy-1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore_in[(yy-1)*EPC_XS+xx+1]) ) ) ||
-				( yy<EPC_YS-1 &&    ( ignore_in[(yy+1)*EPC_XS+xx] || (xx>0 && ignore_in[(yy+1)*EPC_XS+xx-1]) || (xx<EPC_XS-1 && ignore_in[(yy+1)*EPC_XS+xx+1]) ) ) ||
-				( xx>0        &&    ignore_in[yy*EPC_XS+xx-1] ) ||
-				( xx<EPC_XS-1 &&    ignore_in[yy*EPC_XS+xx+1] )
-			  )
-			{
-				dist_out[pxidx] = 0;
-			}
-			else if(ampl[0*EPC_XS*EPC_YS+pxidx_shortint] == 255) // Shortest exposure overexposed
-			{
-				dist_out[pxidx] = 3;
-			}
-			else
-			{
-				int32_t suit0 = ampl_suitability[ampl[0*EPC_XS*EPC_YS+pxidx_shortint]];
-				int32_t suit1 = ampl_suitability[ampl[0*EPC_XS*EPC_YS+pxidx_midint]];
-				int32_t suit2 = ampl_suitability[ampl[1*EPC_XS*EPC_YS+pxidx]];
-
-				int32_t dist0 = dist[0*EPC_XS*EPC_YS+pxidx_shortint];
-				int32_t dist1 = dist[0*EPC_XS*EPC_YS+pxidx_midint];
-				int32_t dist2 = dist[1*EPC_XS*EPC_YS+pxidx];
-
-				int32_t ampl0 = ampl[0*EPC_XS*EPC_YS+pxidx_shortint]*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER;
-				int32_t ampl1 = ampl[0*EPC_XS*EPC_YS+pxidx_midint]*HDR_EXP_MULTIPLIER;
-				int32_t ampl2 = ampl[1*EPC_XS*EPC_YS+pxidx];
-
-				int32_t suit_sum = suit0 + suit1 + suit2;
-
-				if(suit_sum < 10)
-					dist_out[pxidx] = 0;
-				else
-				{
-					int32_t combined_ampl = (ampl0*suit0 + ampl1*suit1 + ampl2*suit2)/suit_sum;
-					int32_t combined_dist = (dist0*suit0 + dist1*suit1 + dist2*suit2)/suit_sum;
-
-					int32_t corr_amount = ((16*(int32_t)stray_ampl)/(int32_t)combined_ampl);
-
-					// Expect higher amplitude from "close" pixels. If the amplitude is low, they are artefacts most likely.
-					int32_t expected_ampl;
-					if(combined_dist > 2000)
-						expected_ampl = stray_ignore;
-					else
-						expected_ampl = (2000*stray_ignore)/combined_dist;
-
-					if(corr_amount > 1000 || corr_amount < -300 || combined_ampl < expected_ampl)
-					{
-						dist_out[pxidx] = 0;
-					}
-					else
-					{
-						combined_dist -= stray_dist;
-
-						combined_dist *= STRAY_CORR_LEVEL + corr_amount;
-						combined_dist /= STRAY_CORR_LEVEL;
-
-						combined_dist += stray_dist;
-
-						if(combined_dist < 1) combined_dist = 1;
-						else if(combined_dist > 6000) combined_dist = 6000;
-
-						dist_out[pxidx] = combined_dist;
-					}
-				}				
-
-			}
-
 		}
 	}
 }
@@ -2201,22 +2110,10 @@ void epc_run()
 #endif
 
 
-#ifdef DUALINT
-		epc_4dcs_dualint(idx); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
-		epc_dualphase_or_int(idx); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
-
-//		epc_intlen_dual(idx, 8, /*even rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER, /*odd rows:*/ SHORTEST_INTEGRATION); // for the next
-		epc_intlen_dual(idx, 1, /*even rows:*/ 8000, /*odd rows:*/ 8000); // for the next
-//		epc_intlen_dual(idx, 8, /*even rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER, /*odd rows:*/ SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
-#else
 		epc_4dcs(idx); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
-#endif
 
 		if(poll_capt_with_timeout_complete()) continue;
 		LED_OFF();
@@ -2243,13 +2140,8 @@ void epc_run()
 			whole process -> minimize their motion blur, i.e., the ignore list is fairly recent now.
 		*/
 
-#ifdef DUALINT
-		static uint8_t  actual_ampl[2*EPC_XS*EPC_YS];
-		static uint16_t actual_dist[2*EPC_XS*EPC_YS];
-#else
 		static uint8_t  actual_ampl[3*EPC_XS*EPC_YS];
 		static uint16_t actual_dist[3*EPC_XS*EPC_YS];
-#endif
 
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
 		trig(idx);
@@ -2259,17 +2151,8 @@ void epc_run()
 		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, mono_comp.img, sizeof(ignore));
 #endif
 
-#ifdef DUALINT
-		epc_normalphase_or_int(idx); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
-		epc_4dcs(idx); // for the next
-		while(epc_i2c_is_busy(buses[idx])); 
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER); // for the next
-		while(epc_i2c_is_busy(buses[idx]));
-#else
 		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
-#endif
 
 		if(poll_capt_with_timeout()) continue;
 
@@ -2286,12 +2169,6 @@ void epc_run()
 			Purpose: The real thing continues.
 		*/
 
-#ifdef DUALINT
-
-		// Do nothing
-
-#else
-
 		dcmi_start_dma(&dcsb, SIZEOF_4DCS);
 		trig(idx);
 		LED_ON();
@@ -2304,7 +2181,6 @@ void epc_run()
 		if(poll_capt_with_timeout()) continue;
 
 		LED_OFF();
-#endif
 
 		/*
 			20 MHz (wrap at 7.5m)
@@ -2314,11 +2190,7 @@ void epc_run()
 			Purpose: The real thing continues: the last shot.
 		*/
 
-#ifdef DUALINT
-		dcmi_start_dma(&dcsb, SIZEOF_4DCS);
-#else
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
-#endif
 		trig(idx);
 		LED_ON();
 
@@ -2332,13 +2204,7 @@ void epc_run()
 
 		// Calculate the previous
 		// tof_calc_dist_ampl works with the dual-integration data as well, it processes pixel-by-pixel
-#ifdef DUALINT
-		tof_calc_dist_ampl(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1]-tempcomp, 1);
-#else
 		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[idx][1]-tempcomp, 1);
-#endif
-
-
 
 
 
@@ -2357,26 +2223,14 @@ void epc_run()
 		// All captures done.
 
 		// Calculate the last measurement:
-#ifdef DUALINT
-		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[idx][1]-tempcomp, 1);
-#else
 		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1]-tempcomp, 1);
-#endif
-
 #ifdef SEND_EXTRA
-#ifdef DUALINT
-		if(raspi_rx[4] == 5) memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
-		if(raspi_rx[4] == 6) memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
-		if(raspi_rx[4] == 7)  memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
-		if(raspi_rx[4] == 8)  memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
-#else
 		if(raspi_rx[4] == 5)  memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
 		if(raspi_rx[4] == 6)  memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
 		if(raspi_rx[4] == 7)  memcpy(raspi_tx.dbg, &actual_ampl[1*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 8)  memcpy(raspi_tx.dbg, &actual_dist[1*EPC_XS*EPC_YS], 2*160*60);
 		if(raspi_rx[4] == 9)  memcpy(raspi_tx.dbg, &actual_ampl[2*EPC_XS*EPC_YS], 1*160*60);
 		if(raspi_rx[4] == 10) memcpy(raspi_tx.dbg, &actual_dist[2*EPC_XS*EPC_YS], 2*160*60);
-#endif
 #endif
 
 		raspi_tx.status = 10;
@@ -2385,11 +2239,8 @@ void epc_run()
 		uint16_t stray_ampl, stray_dist, outstray_n, outstray_ampl;
 
 		calc_stray_estimate(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &stray_ampl, &stray_dist);
-#ifdef DUALINT
-		outstray_n = calc_outside_stray_estimate(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &outstray_ampl);
-#else
 		outstray_n = calc_outside_stray_estimate(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &outstray_ampl);
-#endif
+
 		raspi_tx.dbg_i32[0] = stray_ampl;
 		raspi_tx.dbg_i32[1] = stray_dist;
 
@@ -2416,11 +2267,7 @@ void epc_run()
 			}
 
 			static uint16_t combined_depth[EPC_XS*EPC_YS];
-#ifdef DUALINT
-			tof_calc_dist_3hdr_dualint_and_normal_with_ignore_with_straycomp(combined_depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
-#else
 			tof_calc_dist_3hdr_with_ignore_with_straycomp(combined_depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
-#endif
 			tof_remove_midliers(raspi_tx.depth, combined_depth);
 		}
 
@@ -2430,13 +2277,7 @@ void epc_run()
 		// Bravely calculate the HDR amplitude image while DMA transfers the result
 		tof_calc_ampl_hdr(raspi_tx.ampl, &actual_ampl[2*EPC_XS*EPC_YS], &actual_ampl[1*EPC_XS*EPC_YS]);
 
-#ifdef SEND_EXTRA
-		while(timer_10k < ((idx==N_SENSORS-1)?3000:1500)) // 1.33 FPS
-#else
-//		while(timer_10k < ((idx==N_SENSORS-1)?1500:800)) // 2.6 FPS
-//		while(timer_10k < ((idx==N_SENSORS-1)?2500:800)) // 2.04 FPS
-		while(timer_10k < ((idx==N_SENSORS-1)?2000:900))
-#endif
+		do
 		{
 			if(new_rx)
 			{
@@ -2460,6 +2301,11 @@ void epc_run()
 
 			}
 		}
+#ifdef SEND_EXTRA
+		while(timer_10k < ((idx==N_SENSORS-1)?3000:1500)); // 1.33 FPS
+#else
+		while(timer_10k < ((idx==N_SENSORS-1)?2200:1000)); // 1.92FPS
+#endif
 
 		cnt++;
 
