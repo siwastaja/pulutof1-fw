@@ -30,7 +30,7 @@ main.bin: $(OBJ)
 # .settings is also removed - this makes the binary small, and keeps the old settings
 
 f: main.bin
-	scp main_full.bin pulu@$(robot):~/rn1-tools/pulutof_fw.bin
+	scp main_full.bin pulu@$(robot):~/pulutof1-devkit/pulutof_fw.bin
 
 fr: main.bin
 #	scp main_full.bin hrst@192.168.130.149:~/main_full.bin
