@@ -7,7 +7,7 @@ OBJCOPY = arm-none-eabi-objcopy
 
 CFLAGS = -I. -Os -fno-common -ffunction-sections -ffreestanding -fno-builtin -mthumb -mcpu=cortex-m7 -specs=nano.specs -Wall -fstack-usage -DSTM32F765xx -mfloat-abi=hard -mfpu=fpv5-d16 -fno-strict-aliasing -Wno-discarded-qualifiers
 ASMFLAGS = -S -fverbose-asm
-LDFLAGS = -mcpu=cortex-m7 -mthumb -nostartfiles -gc-sections -mfloat-abi=hard -mfpu=fpv5-d16 -specs=nano.specs
+LDFLAGS = -mcpu=cortex-m7 -mthumb -nostartfiles -mfloat-abi=hard -mfpu=fpv5-d16 -specs=nano.specs
 
 DEPS =
 OBJ = stm32init.o main.o own_std.o tof_table.o flash.o
