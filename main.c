@@ -4,8 +4,12 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <stdbool.h>
 #include "ext_include/stm32f7xx.h"
 #include "stm32_cmsis_extension.h"
+
+#include "../pulutof1-devkit/pulutof.h"
+#define PULUTOF_H_INCLUDE
 
 #include "own_std.h"
 #include "tof_table.h"
@@ -127,13 +131,20 @@ int temperatures[N_SENSORS]; // in degs/10
 volatile int new_rx, new_rx_len;
 volatile int robot_new_rx, robot_new_rx_len;
 
+static struct {
+   bool middle_lier_filter;
+   int  exposure;
+   int  hdr_multiplier;
+} tof_configuration = {true, 80, 7};
 
+#ifndef PULUTOF_H_INCLUDE
 typedef struct __attribute__((packed))
 {
 	int32_t ang; // int32_t range --> -180..+180 deg; let it overflow freely. 1 unit = 83.81903171539 ndeg
 	int32_t x;   // in mm
 	int32_t y;
 } pos_t;
+#endif
 
 void delay_us(uint32_t i) __attribute__((section(".text_itcm")));
 void delay_us(uint32_t i)
@@ -1118,11 +1129,6 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 }
 
 
-// exposures  : 120, 960, 7680
-
-#define SHORTEST_INTEGRATION 120
-#define HDR_EXP_MULTIPLIER 8 // integration time multiplier when going from shot 0 to shot1, or from shot1 to shot2
-
 #define STRAY_CORR_LEVEL 1024 // smaller -> more correction. 2000 for a long time
 #define STRAY_BLANKING_LVL 40 // smaller -> more easily ignored, was 40 for a long time
 
@@ -1133,6 +1139,7 @@ void tof_calc_dist_3hdr_with_ignore(uint16_t* dist_out, uint8_t* ampl, uint16_t*
 */
 void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* ampl, uint16_t* dist, uint8_t* ignore_in, uint16_t stray_ampl, uint16_t stray_dist)
 {
+	int hdr_multiplier = tof_configuration.hdr_multiplier;
 	int stray_ignore = stray_ampl/STRAY_BLANKING_LVL;
 	if(stray_ignore < 5) stray_ignore = 5;
 	for(int yy=0; yy < EPC_YS; yy++)
@@ -1164,8 +1171,10 @@ void tof_calc_dist_3hdr_with_ignore_with_straycomp(uint16_t* dist_out, uint8_t* 
 				int32_t dist1 = dist[1*EPC_XS*EPC_YS+pxidx];
 				int32_t dist2 = dist[2*EPC_XS*EPC_YS+pxidx];
 
-				int32_t ampl0 = ampl[0*EPC_XS*EPC_YS+pxidx]*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER;
-				int32_t ampl1 = ampl[1*EPC_XS*EPC_YS+pxidx]*HDR_EXP_MULTIPLIER;
+//				int32_t ampl0 = ampl[0*EPC_XS*EPC_YS+pxidx]*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER;
+//				int32_t ampl1 = ampl[1*EPC_XS*EPC_YS+pxidx]*HDR_EXP_MULTIPLIER;
+				int32_t ampl0 = ampl[0*EPC_XS*EPC_YS+pxidx]*hdr_multiplier*hdr_multiplier;
+				int32_t ampl1 = ampl[1*EPC_XS*EPC_YS+pxidx]*hdr_multiplier;
 				int32_t ampl2 = ampl[2*EPC_XS*EPC_YS+pxidx];
 
 				int32_t suit_sum = suit0 + suit1 + suit2;
@@ -1247,7 +1256,6 @@ void tof_remove_midliers(uint16_t* out, uint16_t* in)
 	}
 }
 
-
 void process_bw(uint8_t *out, epc_img_t *in)
 {
 	for(int i=0; i<EPC_XS*EPC_YS; i++)
@@ -1288,6 +1296,7 @@ volatile pulutof_to_robot_t pulutof_to_robot;
 
 volatile pos_t latest_pos;
 
+#ifndef PULUTOF_H_INCLUDE
 typedef struct __attribute__((packed)) __attribute__((aligned(4)))
 {
 	uint32_t header;
@@ -1312,6 +1321,7 @@ typedef struct __attribute__((packed)) __attribute__((aligned(4)))
 	int32_t  dbg_i32[8];
 
 } pulutof_frame_t;
+#endif
 
 volatile pulutof_frame_t raspi_tx __attribute__((aligned(4)));
 
@@ -1570,8 +1580,6 @@ void tof_calc_offset(epc_4dcs_t *in, int clk_div, int *n_overs, int *n_unders, i
 	*n_unders = underexps;
 	*n_overs = overexps;
 }
-
-
 
 int run_offset_cal(uint8_t idx)
 {
@@ -1851,6 +1859,53 @@ int poll_capt_with_timeout_complete()
 }
 
 
+static bool pulutof_configurate(void)
+{
+   enum pulutof_status saved_status = raspi_tx.status;
+   pulutof_command_frame_t cmd      = *((volatile pulutof_command_frame_t*)(raspi_rx));
+   
+   raspi_tx.status = PULUTOF_STATUS_CONFIGURATE;
+
+   switch (cmd.header) {
+      
+	case PULUTOF_COMMAND_CALIBRATE_OFFSET:
+	{
+	   raspi_tx.dbg_i32[7] = 999;
+	   if (cmd.parameter < N_SENSORS) {
+	      raspi_tx.dbg_i32[7] = run_offset_cal(cmd.parameter);
+	   } // if
+      	   break;
+	}      
+   	case PULUTOF_COMMAND_MIDLIER_FILTER:
+	{
+	   tof_configuration.middle_lier_filter = (cmd.parameter != 0);
+	   break;
+   	}
+	case PULUTOF_COMMAND_EXPOSURE:
+	{
+	   tof_configuration.exposure = cmd.parameter;
+	   break;
+   	}
+   	case PULUTOF_COMMAND_HDR_MULTIPLIER:
+	{
+	   tof_configuration.hdr_multiplier = cmd.parameter;
+	   break;
+   	}
+	default:
+	{
+	   raspi_tx.status = saved_status;
+	   return false;                    // no configuration command 
+	}
+	   
+   } // switch
+
+   delay_ms(1200);    // wait for devkit software is ready to read PuluToF status 
+   
+   return true;
+
+} // pulutof_configure
+
+
 /*
 
 	Optimization effort:
@@ -1967,6 +2022,9 @@ void epc_run()
 #endif
 		raspi_tx.sensor_idx = idx;
 
+		int hdr_multiplier       = tof_configuration.hdr_multiplier;
+		int shortest_integration = tof_configuration.exposure;
+
 		raspi_tx.timestamps[10] = settings.offsets_at_temps[idx];
 		raspi_tx.timestamps[11] = settings.offsets[idx][1];
 		raspi_tx.timestamps[12] = settings.offsets[idx][2];
@@ -2034,7 +2092,8 @@ void epc_run()
 		if(raspi_rx[4] == 1) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 #endif
 
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER/2);  // For the next
+//		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER/2);  // For the next
+		epc_intlen(idx, 8, shortest_integration*hdr_multiplier*hdr_multiplier/2);  // For the next
 		while(epc_i2c_is_busy(buses[idx]));
 
 		if(poll_capt_with_timeout()) continue;
@@ -2070,7 +2129,8 @@ void epc_run()
 
 		epc_greyscale(idx);	// FOR THE NEXT
 		while(epc_i2c_is_busy(buses[idx]));
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // FOR THE NEXT
+//		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // FOR THE NEXT
+		epc_intlen(idx, 8, shortest_integration*hdr_multiplier); // FOR THE NEXT
 		while(epc_i2c_is_busy(buses[idx]));
 
 		if(poll_capt_with_timeout()) continue;
@@ -2109,10 +2169,10 @@ void epc_run()
 		if(raspi_rx[4] == 3) memcpy(raspi_tx.dbg, ignore, sizeof(ignore));
 #endif
 
-
 		epc_4dcs(idx); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION); // for the next
+//		epc_intlen(idx, 8, SHORTEST_INTEGRATION); // for the next
+		epc_intlen(idx, 8, shortest_integration); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
 		if(poll_capt_with_timeout_complete()) continue;
@@ -2151,7 +2211,7 @@ void epc_run()
 		if(raspi_rx[4] == 4) memcpy(raspi_tx.dbg, mono_comp.img, sizeof(ignore));
 #endif
 
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER); // for the next
+		epc_intlen(idx, 8, shortest_integration*hdr_multiplier); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
 		if(poll_capt_with_timeout()) continue;
@@ -2175,7 +2235,8 @@ void epc_run()
 
 		// Calc the previous:
 		tof_calc_dist_ampl(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1]-tempcomp, 1);
-		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER); // for the next
+//		epc_intlen(idx, 8, SHORTEST_INTEGRATION*HDR_EXP_MULTIPLIER*HDR_EXP_MULTIPLIER); // for the next
+		epc_intlen(idx, 8, shortest_integration*hdr_multiplier*hdr_multiplier); // for the next
 		while(epc_i2c_is_busy(buses[idx]));
 
 		if(poll_capt_with_timeout()) continue;
@@ -2191,7 +2252,8 @@ void epc_run()
 		*/
 
 		dcmi_start_dma(&dcsa, SIZEOF_4DCS);
-		trig(idx);
+
+    trig(idx);
 		LED_ON();
 
 		// This is a great time to copy the latest robot pose.
@@ -2203,27 +2265,21 @@ void epc_run()
 
 
 		// Calculate the previous
-		// tof_calc_dist_ampl works with the dual-integration data as well, it processes pixel-by-pixel
 		tof_calc_dist_ampl(&actual_ampl[1*EPC_XS*EPC_YS], &actual_dist[1*EPC_XS*EPC_YS], &dcsb, settings.offsets[idx][1]-tempcomp, 1);
-
-
 
 		if(poll_capt_with_timeout()) continue;
 
 		LED_OFF();
 
-
-
 		raspi_tx.status = 15;
-
-
-								raspi_tx.timestamps[1] = timer_10k;
+		raspi_tx.timestamps[1] = timer_10k;
 
 
 		// All captures done.
 
 		// Calculate the last measurement:
 		tof_calc_dist_ampl(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &dcsa, settings.offsets[idx][1]-tempcomp, 1);
+
 #ifdef SEND_EXTRA
 		if(raspi_rx[4] == 5)  memcpy(raspi_tx.dbg, &actual_ampl[0], 1*160*60);
 		if(raspi_rx[4] == 6)  memcpy(raspi_tx.dbg, &actual_dist[0], 2*160*60);
@@ -2240,7 +2296,6 @@ void epc_run()
 
 		calc_stray_estimate(&actual_ampl[0*EPC_XS*EPC_YS], &actual_dist[0*EPC_XS*EPC_YS], &stray_ampl, &stray_dist);
 		outstray_n = calc_outside_stray_estimate(&actual_ampl[2*EPC_XS*EPC_YS], &actual_dist[2*EPC_XS*EPC_YS], &outstray_ampl);
-
 		raspi_tx.dbg_i32[0] = stray_ampl;
 		raspi_tx.dbg_i32[1] = stray_dist;
 
@@ -2268,38 +2323,32 @@ void epc_run()
 
 			static uint16_t combined_depth[EPC_XS*EPC_YS];
 			tof_calc_dist_3hdr_with_ignore_with_straycomp(combined_depth, actual_ampl, actual_dist, ignore, combined_stray_ampl, combined_stray_dist);
-			tof_remove_midliers(raspi_tx.depth, combined_depth);
+
+			if(tof_configuration.middle_lier_filter) {
+			   tof_remove_midliers(raspi_tx.depth, combined_depth);
+			} else {
+			   memcpy(raspi_tx.depth, combined_depth, sizeof(combined_depth));
+			} // if-else
+
 		}
 
-								raspi_tx.timestamps[2] = timer_10k;
-
+		raspi_tx.timestamps[2] = timer_10k;
 		raspi_tx.status = 255;
 		// Bravely calculate the HDR amplitude image while DMA transfers the result
 		tof_calc_ampl_hdr(raspi_tx.ampl, &actual_ampl[2*EPC_XS*EPC_YS], &actual_ampl[1*EPC_XS*EPC_YS]);
 
 		do
 		{
-			if(new_rx)
-			{
-				new_rx = 0;
-				if(new_rx_len > 8)
-					raspi_tx.status = 80;
+		   if (new_rx) {
+		      
+		      new_rx = 0;
+		      if(new_rx_len > 8)
+			 raspi_tx.status = 80;
 
-				if(*((volatile uint32_t*)&raspi_rx[0]) == 0xca0ff5e7) // offset calibration cmd
-				{
-					raspi_tx.status = 100;
-					raspi_tx.dbg_i32[7] = 99999;
-
-					*((volatile uint32_t*)&raspi_rx[0]) = 0; // zero it out so that we don't do it again
-					uint8_t sensor_idx = *((volatile uint8_t*)&raspi_rx[4]);
-					__DSB(); __ISB();
-					int ret = 999;
-					if(sensor_idx < N_SENSORS)
-						ret = run_offset_cal(sensor_idx);
-					raspi_tx.dbg_i32[7] = ret;
-				}
-
-			}
+		      if (pulutof_configurate()) {
+ 			 idx = N_SENSORS-1; // restart from the begin after configuration
+		      } // if
+		   }
 		}
 #ifdef SEND_EXTRA
 		while(timer_10k < ((idx==N_SENSORS-1)?3000:1500)); // 1.33 FPS
