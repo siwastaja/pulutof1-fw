@@ -17,6 +17,8 @@
 
 #include "epc635_seq_v10.c"
 
+#define max(a, b) (((a) > (b)) ? (a) : (b))
+
 #define LED_ON()  HI(GPIOF, 2)
 #define LED_OFF() LO(GPIOF, 2)
 
@@ -1861,6 +1863,7 @@ int poll_capt_with_timeout_complete()
 
 static bool pulutof_configurate(void)
 {
+   volatile int start_time_10k      = timer_10k;
    enum pulutof_status saved_status = raspi_tx.status;
    pulutof_command_frame_t cmd      = *((volatile pulutof_command_frame_t*)(raspi_rx));
    
@@ -1871,9 +1874,12 @@ static bool pulutof_configurate(void)
 	case PULUTOF_COMMAND_CALIBRATE_OFFSET:
 	{
 	   raspi_tx.dbg_i32[7] = 999;
+	   
 	   if (cmd.parameter < N_SENSORS) {
 	      raspi_tx.dbg_i32[7] = run_offset_cal(cmd.parameter);
 	   } // if
+
+	   delay_ms(max(0, 6000 - (timer_10k - start_time_10k)/10));   // synchronize to devkit software sleep   
       	   break;
 	}      
    	case PULUTOF_COMMAND_MIDLIER_FILTER:
